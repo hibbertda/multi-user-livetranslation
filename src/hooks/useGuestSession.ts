@@ -28,9 +28,9 @@ export function useGuestSession({ sessionId, token }: UseGuestSessionOptions): U
     'connecting' | 'connected' | 'disconnected' | 'ended' | 'error' | 'rejected'
   >('connecting');
   const [sessionEnded, setSessionEnded] = useState(false);
+  const [guestId] = useState(() => createId());
 
   const channelRef = useRef<SignalingChannel | null>(null);
-  const guestIdRef = useRef(createId());
 
   const handleMessage = useCallback((msg: SessionMessage) => {
     switch (msg.type) {
@@ -76,7 +76,7 @@ export function useGuestSession({ sessionId, token }: UseGuestSessionOptions): U
 
   const join = useCallback((name: string, email: string | undefined, language: string) => {
     const guest: SessionGuest = {
-      id: guestIdRef.current,
+      id: guestId,
       name,
       email,
       language,
@@ -108,16 +108,16 @@ export function useGuestSession({ sessionId, token }: UseGuestSessionOptions): U
     channel.connect();
 
     trackEvent('guest.joining', { sessionId, guestName: name });
-  }, [sessionId, token, handleMessage]);
+  }, [sessionId, token, handleMessage, guestId]);
 
   const sendGuestAudio = useCallback((text: string, detectedLanguage: string) => {
     channelRef.current?.send({
       type: 'guest-audio',
-      guestId: guestIdRef.current,
+      guestId,
       text,
       detectedLanguage,
     });
-  }, []);
+  }, [guestId]);
 
   useEffect(() => {
     return () => {
@@ -132,7 +132,7 @@ export function useGuestSession({ sessionId, token }: UseGuestSessionOptions): U
     connectionStatus,
     join,
     sendGuestAudio,
-    guestId: guestIdRef.current,
+    guestId,
     sessionEnded,
   };
 }

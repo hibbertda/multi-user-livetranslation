@@ -203,7 +203,7 @@ export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, o
       }
     }
     endSession();
-  }, [endSession, session, utterances.length, guests, isRecording, stopRecording]);
+  }, [endSession, session, utterances, guests, isRecording, stopRecording]);
 
   const handleStartListening = useCallback(async () => {
     clearError();
@@ -234,7 +234,7 @@ export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, o
   // Reset auto-start flag when session ends
   useEffect(() => {
     if (!session) autoStartedRef.current = false;
-  }, [stop]);
+  }, [session]);
 
   // In session mode, all local utterances belong to the host.
   // Override speaker labels so there's one fixed identity per side.

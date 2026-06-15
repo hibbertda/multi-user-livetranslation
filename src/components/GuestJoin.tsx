@@ -8,7 +8,7 @@ interface Props {
   defaultLanguage?: string;
 }
 
-export function GuestJoin({ sessionId: _sessionId, token: _token, onJoin, defaultLanguage }: Props) {
+export function GuestJoin({ onJoin, defaultLanguage }: Props) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [language, setLanguage] = useState(defaultLanguage ?? 'en-US');
