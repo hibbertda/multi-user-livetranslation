@@ -1,4 +1,4 @@
-import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
+import { app, HttpRequest, HttpResponseInit } from '@azure/functions';
 import { createSession, patchSession, endSession, listSessions, getSession, deleteSession, getUserSettings, upsertUserSettings, type SessionRecord, type UserSettings } from './cosmos.js';
 import { uploadAudio } from './storage.js';
 import { getClientUrl } from './pubsub.js';
@@ -31,7 +31,7 @@ function error(message: string, status = 400): HttpResponseInit {
 
 // --------------- GET|POST /api/sessions ---------------
 
-async function sessionsHandler(req: HttpRequest, _ctx: InvocationContext): Promise<HttpResponseInit> {
+async function sessionsHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options();
 
   if (req.method === 'GET') {
@@ -60,7 +60,7 @@ app.http('sessions', {
 
 // --------------- GET|PATCH|DELETE /api/sessions/{id} ---------------
 
-async function sessionByIdHandler(req: HttpRequest, _ctx: InvocationContext): Promise<HttpResponseInit> {
+async function sessionByIdHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options();
 
   const id = req.params.id;
@@ -92,7 +92,7 @@ app.http('sessionById', {
 
 // --------------- POST /api/sessions/{id}/end ---------------
 
-async function endSessionHandler(req: HttpRequest, _ctx: InvocationContext): Promise<HttpResponseInit> {
+async function endSessionHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options();
 
   const id = req.params.id;
@@ -112,7 +112,7 @@ app.http('endSession', {
 
 // --------------- POST /api/sessions/{id}/audio ---------------
 
-async function uploadAudioHandler(req: HttpRequest, _ctx: InvocationContext): Promise<HttpResponseInit> {
+async function uploadAudioHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options();
 
   const id = req.params.id;
@@ -143,7 +143,7 @@ app.http('uploadAudio', {
 
 // --------------- GET|PUT /api/settings/{userId} ---------------
 
-async function settingsHandler(req: HttpRequest, _ctx: InvocationContext): Promise<HttpResponseInit> {
+async function settingsHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options();
 
   const userId = req.params.userId;
@@ -177,7 +177,7 @@ app.http('settings', {
 // --------------- GET /api/negotiate ---------------
 // Client calls this to get a Web PubSub WebSocket URL
 
-async function negotiateHandler(req: HttpRequest, _ctx: InvocationContext): Promise<HttpResponseInit> {
+async function negotiateHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options();
 
   const sessionId = req.query.get('session');

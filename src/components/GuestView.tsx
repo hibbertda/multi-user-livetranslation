@@ -25,12 +25,11 @@ export function GuestView({
   connectionStatus,
   hostName,
   guestName,
-  onSendAudio: _onSendAudio,
   onLanguageChange,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const { exportAsJson, exportAsText } = useTranscriptExport();
-  const { devices, selectedDeviceId: _selectedDeviceId, setSelectedDeviceId: _setSelectedDeviceId } = useMicrophoneList();
+  const { devices } = useMicrophoneList();
   const [showSettings, setShowSettings] = useState(false);
 
   // Suppress unused warnings — mic integration will use these
@@ -48,7 +47,7 @@ export function GuestView({
   const displayLangBase = toLanguageBase(displayLanguage);
 
   // Noop speak for guest (no TTS controls on guest side)
-  const noop = useCallback((_text: string, _lang: string) => {}, []);
+  const noop = useCallback(() => {}, []);
 
   return (
     <div className="guest-view">

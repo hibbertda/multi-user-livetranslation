@@ -6,6 +6,7 @@ import type { SessionRecord, SessionUtterance } from '../types';
 export function SessionHistory({ onResume }: { onResume?: (record: SessionRecord) => void }) {
   const [records, setRecords] = useState<SessionRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   // Transcript viewer state
   const [viewingSession, setViewingSession] = useState<SessionRecord | null>(null);
@@ -19,16 +20,14 @@ export function SessionHistory({ onResume }: { onResume?: (record: SessionRecord
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    const data = await fetchSessionHistory({ limit: 50 });
-    setRecords(data);
-    setLoading(false);
-  }, []);
-
   useEffect(() => {
-    void load();
-  }, [load]);
+    void fetchSessionHistory({ limit: 50 }).then((data) => {
+      setRecords(data);
+      setLoading(false);
+    }).catch(() => {
+      setLoading(false);
+    });
+  }, [refreshKey]);
 
   const handleViewTranscript = useCallback(async (record: SessionRecord) => {
     setLoadingTranscript(true);
@@ -147,7 +146,7 @@ export function SessionHistory({ onResume }: { onResume?: (record: SessionRecord
     <div className="session-history">
       <div className="session-history-header">
         <h2>Session History</h2>
-        <button className="session-history-refresh" onClick={() => void load()} disabled={loading}>
+        <button className="session-history-refresh" onClick={() => { setLoading(true); setRefreshKey(k => k + 1); }} disabled={loading}>
           {loading ? 'Loading…' : 'Refresh'}
         </button>
       </div>

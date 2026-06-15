@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { fetchRecentSessions } from '../services/sessionStoreService';
 import type { SessionRecord } from '../types';
 
@@ -13,17 +13,15 @@ export function RecentSessionsMenu({ onViewAll, onResume }: Props) {
   const [loaded, setLoaded] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const load = useCallback(async () => {
-    const data = await fetchRecentSessions(5);
-    setRecords(data);
-    setLoaded(true);
-  }, []);
-
   useEffect(() => {
-    if (open && !loaded) {
-      void load();
-    }
-  }, [open, loaded, load]);
+    if (!open || loaded) return;
+    void fetchRecentSessions(5).then((data) => {
+      setRecords(data);
+      setLoaded(true);
+    }).catch(() => {
+      setLoaded(true);
+    });
+  }, [open, loaded]);
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
@@ -71,7 +69,7 @@ export function RecentSessionsMenu({ onViewAll, onResume }: Props) {
             <span>Recent Sessions</span>
             <button
               className="recent-sessions-refresh"
-              onClick={() => { setLoaded(false); void load(); }}
+              onClick={() => { setLoaded(false); }}
               title="Refresh"
             >
               ↻
