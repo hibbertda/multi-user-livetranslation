@@ -1,0 +1,61 @@
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  color: #1a1a2e;
+  background: #f4f6f9;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* Prevent iOS auto-zoom on input focus */
+@supports (-webkit-touch-callout: none) {
+  input, select, textarea {
+    font-size: 16px;
+  }
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+h1, h2, h3 {
+  font-weight: 600;
+}
+
+button {
+  font-family: inherit;
+}
+
+.config-error-screen {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  padding: 24px;
+  background: #fff7f7;
+  color: #7a1f1f;
+}
+
+.config-error-screen h1 {
+  margin: 0;
+}
+
+.config-error-screen ul {
+  margin: 0;
+  max-width: 700px;
+}

@@ -1,0 +1,95 @@
+name: Deploy
+
+# This workflow is scaffolded and disabled by default.
+# To enable: remove the `if: false` on the jobs, configure the secrets below,
+# and update the trigger to your preferred strategy.
+
+on:
+  workflow_dispatch:        # Manual trigger only for now
+  # push:                   # Uncomment to auto-deploy on push to main
+  #   branches: [main]
+
+# Required GitHub Secrets:
+#   AZURE_CLIENT_ID         - Service principal or federated identity client ID
+#   AZURE_TENANT_ID         - Entra ID tenant ID
+#   AZURE_SUBSCRIPTION_ID   - Azure subscription ID
+#   ACR_LOGIN_SERVER         - e.g. acrlivetranslation.azurecr.io
+#   AZURE_RESOURCE_GROUP     - e.g. rg-live-translation
+#   CONTAINER_APP_NAME       - e.g. ca-live-translation
+#   FUNC_APP_NAME            - e.g. func-live-translation-session
+
+# Required GitHub Variables (non-secret config):
+#   SPEECH_REGION            - e.g. eastus2
+#   SPEECH_RESOURCE_NAME     - e.g. speech-live-translation-abc123
+#   TRANSLATOR_ENDPOINT      - e.g. https://translator-live-translation-abc123.cognitiveservices.azure.com
+#   TRANSLATOR_REGION        - e.g. eastus2
+#   MSAL_CLIENT_ID           - Entra app registration client ID (for frontend MSAL)
+#   MSAL_TENANT_ID           - Entra tenant ID (for frontend MSAL)
+
+permissions:
+  id-token: write   # Required for OIDC federated credentials
+  contents: read
+
+jobs:
+  deploy-frontend:
+    name: Build & Deploy Frontend
+    runs-on: ubuntu-latest
+    # if: false   # ← Remove this line to enable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to ACR
+        run: az acr login --name ${{ secrets.ACR_LOGIN_SERVER }}
+
+      - name: Build and push Docker image
+        run: |
+          IMAGE=${{ secrets.ACR_LOGIN_SERVER }}/live-translation:${{ github.sha }}
+          IMAGE_LATEST=${{ secrets.ACR_LOGIN_SERVER }}/live-translation:latest
+          docker build -t $IMAGE -t $IMAGE_LATEST .
+          docker push $IMAGE
+          docker push $IMAGE_LATEST
+
+      - name: Deploy to Container App
+        run: |
+          az containerapp update \
+            --name ${{ secrets.CONTAINER_APP_NAME }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --image ${{ secrets.ACR_LOGIN_SERVER }}/live-translation:${{ github.sha }}
+
+  deploy-api:
+    name: Deploy API (Azure Functions)
+    runs-on: ubuntu-latest
+    # if: false   # ← Remove this line to enable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install and build API
+        run: cd api && npm ci && npm run build
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to Azure Functions
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ secrets.FUNC_APP_NAME }}
+          package: api
