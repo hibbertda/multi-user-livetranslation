@@ -297,7 +297,7 @@ async function validateAdmission(req: HttpRequest, sessionId: string, guestId: s
   return { session, admission };
 }
 
-async function sessionsHandler(req: HttpRequest): Promise<HttpResponseInit> {
+export async function sessionsHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options(req);
 
   const auth = requireUser(req);
@@ -359,7 +359,7 @@ app.http('sessions', {
   handler: sessionsHandler,
 });
 
-async function sessionByIdHandler(req: HttpRequest): Promise<HttpResponseInit> {
+export async function sessionByIdHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options(req);
 
   const id = req.params.id;
@@ -464,7 +464,7 @@ app.http('sessionById', {
   handler: sessionByIdHandler,
 });
 
-async function createInviteHandler(req: HttpRequest): Promise<HttpResponseInit> {
+export async function createInviteHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options(req);
 
   const sessionId = req.params.id;
@@ -634,7 +634,7 @@ app.http('negotiate', {
   handler: negotiateHandler,
 });
 
-async function guestRequestHandler(req: HttpRequest): Promise<HttpResponseInit> {
+export async function guestRequestHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options(req);
 
   const body = await readJson<{ inviteSecret?: string; sessionId?: string; name?: string; language?: string }>(req);
@@ -692,7 +692,7 @@ app.http('guestRequest', {
   handler: guestRequestHandler,
 });
 
-async function guestRequestStatusHandler(req: HttpRequest): Promise<HttpResponseInit> {
+export async function guestRequestStatusHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options(req);
 
   const requestId = req.params.requestId;
@@ -760,7 +760,7 @@ app.http('pendingGuests', {
   handler: pendingGuestsHandler,
 });
 
-async function approveGuestHandler(req: HttpRequest): Promise<HttpResponseInit> {
+export async function approveGuestHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options(req);
 
   const sessionId = req.params.id;
@@ -802,7 +802,7 @@ app.http('approveGuest', {
   handler: approveGuestHandler,
 });
 
-async function denyGuestHandler(req: HttpRequest): Promise<HttpResponseInit> {
+export async function denyGuestHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options(req);
 
   const sessionId = req.params.id;
@@ -826,7 +826,7 @@ app.http('denyGuest', {
   handler: denyGuestHandler,
 });
 
-async function guestExchangeHandler(req: HttpRequest): Promise<HttpResponseInit> {
+export async function guestExchangeHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options(req);
 
   const body = await readJson<{ ticket?: string; sessionId?: string }>(req);
