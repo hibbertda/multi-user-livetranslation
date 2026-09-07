@@ -136,8 +136,9 @@ export async function requestGuestAccess(payload: {
 }
 
 export async function getGuestRequestStatus(requestId: string, requestSecret: string): Promise<GuestRequestStatusResponse> {
-  const query = new URLSearchParams({ secret: requestSecret });
-  return requestJson(`/api/guest/request/${encodeURIComponent(requestId)}/status?${query.toString()}`);
+  return requestJson(`/api/guest/request/${encodeURIComponent(requestId)}/status`, {
+    headers: { 'X-Request-Secret': requestSecret },
+  });
 }
 
 export async function exchangeGuestTicket(ticket: string, sessionId: string): Promise<GuestExchangeResponse> {

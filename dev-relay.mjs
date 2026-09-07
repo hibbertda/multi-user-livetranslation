@@ -37,8 +37,12 @@ wss.on('connection', (ws, req) => {
       sessions.set(sessionId, { token, clients: new Set(), hostWs: null, ended: false });
     }
     const state = sessions.get(sessionId);
+    if (state.ended) {
+      console.log(`[relay] host rejected — session ${sessionId.slice(0, 8)}… has ended`);
+      ws.close(4003, 'Session has ended');
+      return;
+    }
     state.hostWs = ws;
-    state.ended = false;
     state.clients.add(ws);
     console.log(`[relay] host joined session ${sessionId.slice(0, 8)}… (${state.clients.size} clients)`);
   } else {

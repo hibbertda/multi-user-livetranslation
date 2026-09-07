@@ -154,7 +154,7 @@ export function SessionHistory({ onResume }: { onResume?: (record: SessionRecord
       ) : (
         <div className="session-card-list">
           {records.map((record) => (
-            <div key={record.id} className={`session-card${record.status === 'active' ? ' session-card--active' : ''}`} onClick={() => setDetailRecord(record)} role="button" tabIndex={0}>
+            <div key={record.id} className={`session-card${record.status === 'active' ? ' session-card--active' : ''}`} onClick={() => setDetailRecord(record)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setDetailRecord(record); } }} role="button" tabIndex={0}>
               <div className="session-card-top">
                 <div className="session-card-title">{record.title ?? 'Untitled Session'}</div>
                 <div className="session-card-top-right" onClick={(event) => event.stopPropagation()}>

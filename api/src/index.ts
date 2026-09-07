@@ -33,7 +33,7 @@ import {
 import { uploadAudio } from './storage.js';
 import type { AuthenticatedUser } from './auth.js';
 import { getAuthenticatedUser } from './auth.js';
-import { isExpired, validateGuestName, validateLanguage, validateText } from './validation.js';
+import { isExpired, validateGuestName, validateLanguage, validateText, isValidSessionId, validateTitle, validateSessionStatus, validateUtteranceCount, validateDurationMs, constantTimeEqual, findUnknownFields } from './validation.js';
 import {
   getGuestClientUrl,
   getGuestUserId,
@@ -62,11 +62,11 @@ const TICKET_TTL_MS = 5 * 60 * 1000;
 const REQUESTS_PER_IP_PER_MINUTE = 5;
 const GUEST_AUDIO_PER_MINUTE = 30;
 const MAX_PENDING_REQUESTS_PER_SESSION = 20;
-const ALLOWED_ORIGIN_VALUES = (process.env.ALLOWED_ORIGINS ?? '*')
+const ALLOWED_ORIGIN_VALUES = (process.env.ALLOWED_ORIGINS ?? '')
   .split(',')
   .map((value) => value.trim())
   .filter(Boolean);
-const ALLOW_ALL_ORIGINS = ALLOWED_ORIGIN_VALUES.length === 0 || ALLOWED_ORIGIN_VALUES.includes('*');
+const ALLOW_ALL_ORIGINS = ALLOWED_ORIGIN_VALUES.includes('*');
 const welcomeCache = new Map<string, Map<string, WelcomePayload>>();
 const ipRequestRateLimiter = new Map<string, number[]>();
 const guestAudioRateLimiter = new Map<string, number[]>();
@@ -104,7 +104,7 @@ function buildHeaders(req: HttpRequest, additional: Record<string, string> = {})
 
   const headers: Record<string, string> = {
     'Access-Control-Allow-Methods': 'GET, POST, PATCH, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Request-Secret',
     'Cache-Control': 'no-store',
     'Referrer-Policy': 'strict-origin-when-cross-origin',
     'X-Content-Type-Options': 'nosniff',
@@ -315,23 +315,37 @@ async function sessionsHandler(req: HttpRequest): Promise<HttpResponseInit> {
     return error(req, 'Missing required fields: id, hostName, languageA, languageB');
   }
 
+  if (!isValidSessionId(body.id)) {
+    return error(req, 'Invalid session ID format');
+  }
+
+  if (!validateLanguage(body.languageA) || !validateLanguage(body.languageB)) {
+    return error(req, 'Unsupported language code');
+  }
+
+  const hostName = body.hostName.trim();
+  if (!hostName || hostName.length > 200) {
+    return error(req, 'Invalid hostName');
+  }
+
+  const title = body.title?.trim() || `Session ${new Date().toLocaleString()}`;
+  if (title.length > 200) {
+    return error(req, 'Title too long');
+  }
+
   const record: SessionRecord = {
     id: body.id,
     ownerId: auth.user.userId,
-    title: body.title?.trim() || `Session ${new Date(body.startedAt ?? Date.now()).toLocaleString()}`,
-    hostName: body.hostName.trim() || auth.user.name || 'Host',
-    hostEmail: auth.user.email ?? body.hostEmail,
+    title,
+    hostName,
+    hostEmail: auth.user.email,
     languageA: body.languageA,
     languageB: body.languageB,
-    invites: Array.isArray(body.invites) ? body.invites : [],
-    guests: Array.isArray(body.guests) ? body.guests : [],
-    utteranceCount: body.utteranceCount ?? 0,
-    utterances: body.utterances,
-    startedAt: body.startedAt ?? Date.now(),
-    endedAt: body.endedAt,
-    durationMs: body.durationMs,
-    audioUrl: body.audioUrl,
-    status: body.status === 'ended' ? 'ended' : 'active',
+    invites: [],
+    guests: [],
+    utteranceCount: 0,
+    startedAt: Date.now(),
+    status: 'active',
   };
 
   await createSession(record);
@@ -364,19 +378,81 @@ async function sessionByIdHandler(req: HttpRequest): Promise<HttpResponseInit> {
     return json(req, { ok: true });
   }
 
-  const patch = await readJson<Partial<SessionRecord>>(req);
-  const sanitizedPatch: Partial<SessionRecord> = {
-    title: patch.title,
-    languageA: patch.languageA,
-    languageB: patch.languageB,
-    guests: patch.guests,
-    utteranceCount: patch.utteranceCount,
-    utterances: patch.utterances,
-    endedAt: patch.endedAt,
-    durationMs: patch.durationMs,
-    audioUrl: patch.audioUrl,
-    status: patch.status,
-  };
+  const PATCH_ALLOWED_FIELDS = new Set(['title', 'languageA', 'languageB', 'guests', 'utteranceCount', 'utterances', 'endedAt', 'durationMs', 'status']);
+  const patch = await readJson<Record<string, unknown>>(req);
+  const unknownFields = findUnknownFields(patch, PATCH_ALLOWED_FIELDS);
+  if (unknownFields.length > 0) {
+    return error(req, `Unknown fields: ${unknownFields.join(', ')}`);
+  }
+
+  const sanitizedPatch: Partial<SessionRecord> = {};
+
+  if ('title' in patch) {
+    if (typeof patch.title !== 'string') return error(req, 'title must be a string');
+    const validTitle = validateTitle(patch.title);
+    if (!validTitle) return error(req, 'Invalid title');
+    sanitizedPatch.title = validTitle;
+  }
+
+  if ('languageA' in patch) {
+    if (typeof patch.languageA !== 'string' || !validateLanguage(patch.languageA)) {
+      return error(req, 'Invalid languageA');
+    }
+    sanitizedPatch.languageA = patch.languageA as SessionRecord['languageA'];
+  }
+
+  if ('languageB' in patch) {
+    if (typeof patch.languageB !== 'string' || !validateLanguage(patch.languageB)) {
+      return error(req, 'Invalid languageB');
+    }
+    sanitizedPatch.languageB = patch.languageB as SessionRecord['languageB'];
+  }
+
+  if ('status' in patch) {
+    if (typeof patch.status !== 'string') return error(req, 'status must be a string');
+    const validStatus = validateSessionStatus(patch.status);
+    if (!validStatus) return error(req, 'Invalid status');
+    sanitizedPatch.status = validStatus;
+  }
+
+  if ('utteranceCount' in patch) {
+    const validCount = validateUtteranceCount(patch.utteranceCount);
+    if (validCount === null) return error(req, 'Invalid utteranceCount');
+    sanitizedPatch.utteranceCount = validCount;
+  }
+
+  if ('durationMs' in patch) {
+    if (patch.durationMs === null) {
+      sanitizedPatch.durationMs = null;
+    } else {
+      const validDuration = validateDurationMs(patch.durationMs);
+      if (validDuration === null) return error(req, 'Invalid durationMs');
+      sanitizedPatch.durationMs = validDuration;
+    }
+  }
+
+  if ('endedAt' in patch) {
+    if (patch.endedAt === null) {
+      sanitizedPatch.endedAt = null;
+    } else if (typeof patch.endedAt !== 'number' || !Number.isFinite(patch.endedAt)) {
+      return error(req, 'Invalid endedAt');
+    } else {
+      sanitizedPatch.endedAt = patch.endedAt;
+    }
+  }
+
+  if ('guests' in patch) {
+    if (!Array.isArray(patch.guests)) return error(req, 'guests must be an array');
+    sanitizedPatch.guests = (patch as Partial<SessionRecord>).guests;
+  }
+
+  if ('utterances' in patch) {
+    if (patch.utterances !== undefined && !Array.isArray(patch.utterances)) {
+      return error(req, 'utterances must be an array');
+    }
+    sanitizedPatch.utterances = (patch as Partial<SessionRecord>).utterances;
+  }
+
   await patchSession(id, sanitizedPatch);
   return json(req, { ok: true });
 }
@@ -591,6 +667,7 @@ async function guestRequestHandler(req: HttpRequest): Promise<HttpResponseInit> 
 
   const requestId = randomUUID();
   const requestSecret = randomHex(32);
+  const requestSecretHash = sha256Hex(requestSecret);
   const request: GuestRequestRecord = {
     id: requestId,
     type: 'guestRequest',
@@ -599,7 +676,7 @@ async function guestRequestHandler(req: HttpRequest): Promise<HttpResponseInit> 
     name,
     language,
     status: 'pending',
-    requestSecret,
+    requestSecret: requestSecretHash,
     createdAt: now,
     expiresAt: now + REQUEST_TTL_MS,
     ip: sha256Hex(ip),
@@ -619,11 +696,12 @@ async function guestRequestStatusHandler(req: HttpRequest): Promise<HttpResponse
   if (req.method === 'OPTIONS') return options(req);
 
   const requestId = req.params.requestId;
-  const secret = req.query.get('secret')?.trim();
+  const secret = req.headers.get('x-request-secret')?.trim();
   if (!requestId || !secret) return error(req, 'Missing request id or secret');
 
   const request = await getGuestRequest(requestId);
-  if (!request || request.requestSecret !== secret) return error(req, 'Request not found', 404);
+  const secretHash = sha256Hex(secret);
+  if (!request || !constantTimeEqual(request.requestSecret, secretHash)) return error(req, 'Request not found', 404);
 
   const session = await getSession(request.sessionId);
   const status = markRequestExpiredIfNeeded(request, session);

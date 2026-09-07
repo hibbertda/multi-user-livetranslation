@@ -35,14 +35,20 @@ export async function updateSessionRecord(
   sessionId: string,
   patch: Partial<SessionRecord>,
   accessToken: string,
-): Promise<void> {
+): Promise<boolean> {
   try {
-    await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, accessToken, {
+    const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, accessToken, {
       method: 'PATCH',
       body: JSON.stringify(patch),
     });
+    if (!response.ok) {
+      console.warn(`[sessionStore] Failed to update session record: HTTP ${response.status}`);
+      return false;
+    }
+    return true;
   } catch {
     console.warn('[sessionStore] Failed to update session record');
+    return false;
   }
 }
 
@@ -63,9 +69,9 @@ export async function endSessionRecord(
   guests: SessionGuest[],
   accessToken: string,
   utterances?: Utterance[],
-): Promise<void> {
+): Promise<boolean> {
   try {
-    await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/end`, accessToken, {
+    const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/end`, accessToken, {
       method: 'POST',
       body: JSON.stringify({
         utteranceCount,
@@ -73,8 +79,14 @@ export async function endSessionRecord(
         utterances: utterances?.map(toSessionUtterance),
       }),
     });
+    if (!response.ok) {
+      console.warn(`[sessionStore] Failed to end session record: HTTP ${response.status}`);
+      return false;
+    }
+    return true;
   } catch {
     console.warn('[sessionStore] Failed to end session record');
+    return false;
   }
 }
 
@@ -84,6 +96,10 @@ export async function resumeSessionRecord(sessionId: string, accessToken: string
       method: 'PATCH',
       body: JSON.stringify({ status: 'active', endedAt: null, durationMs: null }),
     });
+    if (!response.ok) {
+      console.warn(`[sessionStore] Failed to resume session record: HTTP ${response.status}`);
+      return false;
+    }
     return response.ok;
   } catch {
     console.warn('[sessionStore] Failed to resume session record');
@@ -179,7 +195,10 @@ export function createDebouncedUpdater(
 
     try {
       const accessToken = await getAccessToken();
-      await updateSessionRecord(sessionId, nextPatch, accessToken);
+      const ok = await updateSessionRecord(sessionId, nextPatch, accessToken);
+      if (!ok) {
+        console.warn('[sessionStore] Debounced session update was rejected by server');
+      }
     } catch {
       console.warn('[sessionStore] Failed to flush debounced session update');
     }

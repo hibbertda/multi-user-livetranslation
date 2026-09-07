@@ -242,7 +242,10 @@ export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, o
       if (!currentSession) return;
       await debouncedUpdaterRef.current?.flush();
       const accessToken = await getApiToken();
-      await endSessionRecord(currentSession.id, currentUtterances.length, currentGuests, accessToken, currentUtterances);
+      const ended = await endSessionRecord(currentSession.id, currentUtterances.length, currentGuests, accessToken, currentUtterances);
+      if (!ended) {
+        console.warn('[SessionPanel] Server rejected end-session request');
+      }
 
       if (isRecording) {
         const blob = await stopRecording();
