@@ -9,7 +9,7 @@ export async function fetchSpeechToken(entraToken: string): Promise<string> {
   const res = await fetch(url, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${entraToken}`,
+      Authorization: 'Bearer ' + entraToken,
       'Content-Length': '0',
     },
   });
@@ -67,7 +67,6 @@ export function createTranslationRecognizer(
     config.speechRegion,
   );
 
-  // Add target languages (base language codes like 'en', 'es', 'ar')
   for (const lang of targetLanguages) {
     translationConfig.addTargetLanguage(lang);
   }

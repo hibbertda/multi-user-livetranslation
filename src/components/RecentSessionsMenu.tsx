@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { useAuth } from '../hooks/useAuth';
 import { fetchRecentSessions } from '../services/sessionStoreService';
 import type { SessionRecord } from '../types';
 
@@ -8,6 +9,7 @@ interface Props {
 }
 
 export function RecentSessionsMenu({ onViewAll, onResume }: Props) {
+  const { getApiToken } = useAuth();
   const [open, setOpen] = useState(false);
   const [records, setRecords] = useState<SessionRecord[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -15,17 +17,17 @@ export function RecentSessionsMenu({ onViewAll, onResume }: Props) {
 
   useEffect(() => {
     if (!open || loaded) return;
-    void fetchRecentSessions(5).then((data) => {
+    void getApiToken().then((accessToken) => fetchRecentSessions(accessToken, 5)).then((data) => {
       setRecords(data);
       setLoaded(true);
     }).catch(() => {
       setLoaded(true);
     });
-  }, [open, loaded]);
+  }, [getApiToken, loaded, open]);
 
   useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+    function handleClick(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
         setOpen(false);
       }
     }
@@ -34,17 +36,17 @@ export function RecentSessionsMenu({ onViewAll, onResume }: Props) {
   }, [open]);
 
   function formatDate(ts: number) {
-    const d = new Date(ts);
+    const date = new Date(ts);
     const now = new Date();
-    const diffMs = now.getTime() - d.getTime();
+    const diffMs = now.getTime() - date.getTime();
     const diffDays = Math.floor(diffMs / 86400000);
     if (diffDays === 0) return 'Today';
     if (diffDays === 1) return 'Yesterday';
     if (diffDays < 7) return `${diffDays}d ago`;
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
 
-  function formatDuration(ms?: number) {
+  function formatDuration(ms?: number | null) {
     if (!ms) return '';
     const min = Math.round(ms / 60000);
     return min < 1 ? '<1m' : `${min}m`;
@@ -81,14 +83,14 @@ export function RecentSessionsMenu({ onViewAll, onResume }: Props) {
             <div className="recent-sessions-empty">No sessions yet</div>
           ) : (
             <ul className="recent-sessions-list">
-              {records.map((r) => (
-                <li key={r.id} className="recent-session-item">
+              {records.map((record) => (
+                <li key={record.id} className="recent-session-item">
                   <div className="recent-session-top">
-                    <div className="recent-session-title">{r.title ?? r.hostName ?? 'Untitled'}</div>
+                    <div className="recent-session-title">{record.title ?? record.hostName ?? 'Untitled'}</div>
                     {onResume && (
                       <button
                         className="recent-session-resume"
-                        onClick={() => { setOpen(false); onResume(r); }}
+                        onClick={() => { setOpen(false); onResume(record); }}
                         title="Resume session"
                       >
                         Resume
@@ -96,10 +98,10 @@ export function RecentSessionsMenu({ onViewAll, onResume }: Props) {
                     )}
                   </div>
                   <div className="recent-session-meta">
-                    <span>{formatDate(r.startedAt)}</span>
-                    {r.durationMs != null && <span>{formatDuration(r.durationMs)}</span>}
-                    <span className={`recent-session-status recent-session-status--${r.status}`}>
-                      {r.status === 'active' ? '● Live' : '● Ended'}
+                    <span>{formatDate(record.startedAt)}</span>
+                    {record.durationMs != null && <span>{formatDuration(record.durationMs)}</span>}
+                    <span className={`recent-session-status recent-session-status--${record.status}`}>
+                      {record.status === 'active' ? '● Live' : '● Ended'}
                     </span>
                   </div>
                 </li>

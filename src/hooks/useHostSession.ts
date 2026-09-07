@@ -1,126 +1,123 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { SignalingChannel } from '../services/signalingService';
+import { SignalingChannel, type ConnectionStatus } from '../services/signalingService';
+import { sendWelcome } from '../services/guestAdmission';
 import type { Session, SessionGuest, SessionMessage, Utterance, Speaker } from '../types';
-import { createId } from '../utils/id';
 import { trackEvent } from '../utils/telemetry';
+
+interface UseHostSessionOptions {
+  getApiToken: () => Promise<string>;
+}
 
 interface UseHostSessionReturn {
   session: Session | null;
   guests: SessionGuest[];
-  connectionStatus: 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
-  createSession: (hostName: string, languageA: string, languageB: string) => void;
+  connectionStatus: 'idle' | ConnectionStatus;
+  createSession: (session: Session) => void;
   resumeSession: (session: Session) => void;
   endSession: () => void;
-  inviteUrl: string | null;
+  removeGuest: (guestId: string) => void;
   broadcastUtterance: (utterance: Utterance) => void;
   broadcastUtteranceUpdate: (utteranceId: string, translatedTexts: Record<string, string>) => void;
   broadcastSpeakerUpdate: (speaker: Speaker) => void;
 }
 
-function generateToken(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-export function useHostSession(): UseHostSessionReturn {
+export function useHostSession({ getApiToken }: UseHostSessionOptions): UseHostSessionReturn {
   const [session, setSession] = useState<Session | null>(null);
   const [guests, setGuests] = useState<SessionGuest[]>([]);
-  const [connectionStatus, setConnectionStatus] = useState<
-    'idle' | 'connecting' | 'connected' | 'disconnected' | 'error'
-  >('idle');
-  const [inviteUrl, setInviteUrl] = useState<string | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<'idle' | ConnectionStatus>('idle');
 
   const channelRef = useRef<SignalingChannel | null>(null);
   const sessionRef = useRef<Session | null>(null);
   const utterancesSnapshotRef = useRef<Utterance[]>([]);
   const speakersSnapshotRef = useRef<Map<string, Speaker>>(new Map());
 
-  const handleMessage = useCallback((msg: SessionMessage) => {
-    if (msg.type === 'join') {
-      setGuests((prev) => {
-        if (prev.some((g) => g.id === msg.guest.id)) return prev;
-        trackEvent('session.guest_joined', { guestId: msg.guest.id, guestName: msg.guest.name });
-        return [...prev, msg.guest];
-      });
-      // Send welcome with current state (read from ref, not stale closure)
-      channelRef.current?.send({
-        type: 'welcome',
-        session: sessionRef.current!,
+  const sendGuestWelcome = useCallback(async (guest: SessionGuest) => {
+    if (!sessionRef.current) return;
+
+    const accessToken = await getApiToken();
+    await sendWelcome(
+      sessionRef.current.id,
+      guest.id,
+      guest.id,
+      {
+        session: sessionRef.current,
         speakers: Array.from(speakersSnapshotRef.current.entries()),
         utterances: utterancesSnapshotRef.current,
-      });
-    }
-  }, []);
+      },
+      accessToken,
+    );
+  }, [getApiToken]);
 
-  /** Shared helper: connect signaling channel for a given session */
-  const connectChannel = useCallback((id: string, token: string) => {
-    // Close any existing channel first
+  const handleMessage = useCallback((message: SessionMessage) => {
+    if (message.type === 'join') {
+      setGuests((previous) => {
+        if (previous.some((guest) => guest.id === message.guest.id)) return previous;
+        trackEvent('session.guest_joined', { guestId: message.guest.id, guestName: message.guest.name });
+        return [...previous, message.guest];
+      });
+      void sendGuestWelcome(message.guest);
+      return;
+    }
+
+    if (message.type === 'guest-audio') {
+      trackEvent('session.guest_audio_received', { guestId: message.guestId });
+    }
+  }, [sendGuestWelcome]);
+
+  const connectChannel = useCallback((sessionId: string) => {
     channelRef.current?.close();
 
-    const baseUrl = import.meta.env.VITE_INVITE_BASE_URL || window.location.origin;
-    const url = `${baseUrl}/join?session=${encodeURIComponent(id)}&token=${encodeURIComponent(token)}`;
-    setInviteUrl(url);
-
     const channel = new SignalingChannel({
-      sessionId: id,
-      token,
+      sessionId,
       role: 'host',
       onMessage: handleMessage,
       onStatus: (status) => {
         if (status === 'connecting') setConnectionStatus('connecting');
         else if (status === 'connected') setConnectionStatus('connected');
         else if (status === 'disconnected') setConnectionStatus('disconnected');
-        else setConnectionStatus('error');
+        else if (status === 'rejected') setConnectionStatus('error');
+        else setConnectionStatus(status);
       },
+      getAccessToken: getApiToken,
     });
 
     channelRef.current = channel;
     channel.connect();
-  }, [handleMessage]);
+  }, [getApiToken, handleMessage]);
 
-  const createSession = useCallback((hostName: string, languageA: string, languageB: string) => {
-    const id = createId();
-    const token = generateToken();
-    const newSession: Session = {
-      id,
-      token,
-      hostName,
-      createdAt: Date.now(),
-      languageA,
-      languageB,
-    };
-
-    sessionRef.current = newSession;
-    setSession(newSession);
+  const createSession = useCallback((nextSession: Session) => {
+    sessionRef.current = nextSession;
+    setSession(nextSession);
     setGuests([]);
     utterancesSnapshotRef.current = [];
     speakersSnapshotRef.current = new Map();
-
-    connectChannel(id, token);
-    trackEvent('session.created', { sessionId: id });
+    connectChannel(nextSession.id);
+    trackEvent('session.created', { sessionId: nextSession.id });
   }, [connectChannel]);
 
-  const resumeSession = useCallback((prev: Session) => {
-    sessionRef.current = prev;
-    setSession(prev);
+  const resumeSession = useCallback((nextSession: Session) => {
+    sessionRef.current = nextSession;
+    setSession(nextSession);
     setGuests([]);
     utterancesSnapshotRef.current = [];
     speakersSnapshotRef.current = new Map();
-
-    connectChannel(prev.id, prev.token);
-    trackEvent('session.resumed', { sessionId: prev.id });
+    connectChannel(nextSession.id);
+    trackEvent('session.resumed', { sessionId: nextSession.id });
   }, [connectChannel]);
 
   const endSession = useCallback(() => {
     channelRef.current?.send({ type: 'session-end' });
     channelRef.current?.close();
     channelRef.current = null;
+    sessionRef.current = null;
     setSession(null);
     setGuests([]);
-    setInviteUrl(null);
     setConnectionStatus('idle');
     trackEvent('session.ended');
+  }, []);
+
+  const removeGuest = useCallback((guestId: string) => {
+    setGuests((previous) => previous.filter((guest) => guest.id !== guestId));
   }, []);
 
   const broadcastUtterance = useCallback((utterance: Utterance) => {
@@ -129,9 +126,9 @@ export function useHostSession(): UseHostSessionReturn {
   }, []);
 
   const broadcastUtteranceUpdate = useCallback((utteranceId: string, translatedTexts: Record<string, string>) => {
-    utterancesSnapshotRef.current = utterancesSnapshotRef.current.map((u) =>
-      u.id === utteranceId ? { ...u, translatedTexts } : u,
-    );
+    utterancesSnapshotRef.current = utterancesSnapshotRef.current.map((utterance) => (
+      utterance.id === utteranceId ? { ...utterance, translatedTexts } : utterance
+    ));
     channelRef.current?.send({ type: 'utterance-update', utteranceId, translatedTexts });
   }, []);
 
@@ -140,7 +137,6 @@ export function useHostSession(): UseHostSessionReturn {
     channelRef.current?.send({ type: 'speaker-update', speaker });
   }, []);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       channelRef.current?.close();
@@ -154,7 +150,7 @@ export function useHostSession(): UseHostSessionReturn {
     createSession,
     resumeSession,
     endSession,
-    inviteUrl,
+    removeGuest,
     broadcastUtterance,
     broadcastUtteranceUpdate,
     broadcastSpeakerUpdate,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { validateConfig, type AppConfig } from './config';
+import { computeSha256Hex } from './services/guestAdmission';
 
 const validConfig: AppConfig = {
   speechRegion: 'eastus2',
@@ -27,5 +28,9 @@ describe('validateConfig', () => {
     expect(errors).toContain('Missing speech region (VITE_SPEECH_REGION).');
     expect(errors).toContain('Azure client ID is missing or invalid (VITE_AZURE_CLIENT_ID).');
     expect(errors).toContain('Translator endpoint must use HTTPS.');
+  });
+
+  it('computes invite hashes consistently', async () => {
+    await expect(computeSha256Hex('invite-secret')).resolves.toBe('2a1ed5f04ebb12c50d33ea3031b46260a6d503e72c1d992b2fd3d9e048cd5c8f');
   });
 });

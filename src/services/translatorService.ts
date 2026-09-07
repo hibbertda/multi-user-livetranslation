@@ -11,14 +11,14 @@ export async function translateText(
   from: string,
   to: string[],
 ): Promise<TranslationResult> {
-  const toParams = to.map((t) => `to=${t}`).join('&');
+  const toParams = to.map((target) => `to=${target}`).join('&');
   const fromParam = from ? `from=${from}&` : '';
   const url = `${config.translatorEndpoint}/translator/text/v3.0/translate?${fromParam}${toParams}`;
 
   const response = await fetch(url, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: 'Bearer ' + token,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify([{ Text: text }]),

@@ -10,17 +10,23 @@ import { LanguageSelector } from './LanguageSelector';
 import { MicrophoneSelector } from './MicrophoneSelector';
 import { SaveControls } from './SaveControls';
 import { InviteModal } from './InviteModal';
-import type { DetectionMode, TranslationMode, SessionRecord } from '../types';
+import type { DetectionMode, GuestRequest, Session, SessionRecord, TranslationMode } from '../types';
 import { getLanguageLabel } from '../languages';
-
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import {
   createSessionRecord,
   endSessionRecord,
+  createDebouncedUpdater,
   resumeSessionRecord,
   uploadSessionAudio,
-  createDebouncedUpdater,
 } from '../services/sessionStoreService';
+import {
+  approveGuestRequest,
+  fetchPendingGuestRequests,
+  revokeGuest,
+  denyGuestRequest,
+} from '../services/guestAdmission';
+import { createId } from '../utils/id';
 
 interface SessionPanelProps {
   resumeRecord?: SessionRecord | null;
@@ -32,7 +38,7 @@ interface SessionPanelProps {
 }
 
 export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, onTranslationModeChange, microphoneDeviceId, onMicrophoneChange }: SessionPanelProps) {
-  const { getToken, account } = useAuth();
+  const { getToken, getApiToken, account, userId } = useAuth();
   const { devices, selectedDeviceId } = useMicrophoneList();
   const { speak } = useSpeechSynthesis(getToken);
   const { exportAsJson, exportAsText } = useTranscriptExport();
@@ -44,6 +50,7 @@ export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, o
   const [showInvite, setShowInvite] = useState(false);
   const [uiError, setUiError] = useState<string | null>(null);
   const [sessionTitle, setSessionTitle] = useState('');
+  const [pendingRequests, setPendingRequests] = useState<GuestRequest[]>([]);
 
   const effectiveDeviceId = microphoneDeviceId || selectedDeviceId;
 
@@ -67,68 +74,69 @@ export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, o
     createSession,
     resumeSession,
     endSession,
-    inviteUrl,
+    removeGuest,
     broadcastUtterance,
     broadcastUtteranceUpdate,
-  } = useHostSession();
+  } = useHostSession({ getApiToken });
 
-  // Handle resume from history
   const resumeHandledRef = useRef<string | null>(null);
   useEffect(() => {
-    if (resumeRecord && !session && resumeHandledRef.current !== resumeRecord.id) {
-      resumeHandledRef.current = resumeRecord.id;
-      const restoredSession = {
-        id: resumeRecord.id,
-        token: resumeRecord.token,
-        hostName: resumeRecord.hostName,
-        createdAt: resumeRecord.startedAt,
-        languageA: resumeRecord.languageA,
-        languageB: resumeRecord.languageB,
-        title: resumeRecord.title,
-      };
-      setLanguageA(resumeRecord.languageA);
-      setLanguageB(resumeRecord.languageB);
-      setHostDisplayLanguage(resumeRecord.languageA);
-      setSessionTitle(resumeRecord.title);
-      resumeSession(restoredSession);
-      // Await the resume PATCH so the session status is 'active' before
-      // the guest can negotiate (otherwise negotiate returns 410).
-      void resumeSessionRecord(resumeRecord.id).then(() => {
-        setShowInvite(true);
-      });
-      onResumeHandled?.();
-    }
-  }, [resumeRecord, session, resumeSession, onResumeHandled]);
+    if (!resumeRecord || session || resumeHandledRef.current === resumeRecord.id) return;
 
-  // Track what we've already broadcast to avoid duplicates
+    resumeHandledRef.current = resumeRecord.id;
+    setLanguageA(resumeRecord.languageA);
+    setLanguageB(resumeRecord.languageB);
+    setHostDisplayLanguage(resumeRecord.languageA);
+    setSessionTitle(resumeRecord.title);
+
+    const restoredSession: Session = {
+      id: resumeRecord.id,
+      ownerId: resumeRecord.ownerId,
+      hostName: resumeRecord.hostName,
+      createdAt: resumeRecord.startedAt,
+      languageA: resumeRecord.languageA,
+      languageB: resumeRecord.languageB,
+      title: resumeRecord.title,
+    };
+
+    void (async () => {
+      const accessToken = await getApiToken();
+      const ok = await resumeSessionRecord(resumeRecord.id, accessToken);
+      if (!ok) throw new Error('Unable to resume session.');
+      resumeSession(restoredSession);
+      setShowInvite(true);
+      onResumeHandled?.();
+    })().catch((error) => {
+      setUiError(error instanceof Error ? error.message : 'Unable to resume session.');
+    });
+  }, [getApiToken, onResumeHandled, resumeRecord, resumeSession, session]);
+
   const lastBroadcastCountRef = useRef(0);
   const broadcastedTranslationsRef = useRef(new Map<string, number>());
 
-  // Broadcast new utterances when they appear (override speaker to host name)
   useEffect(() => {
     if (!session) return;
     if (utterances.length > lastBroadcastCountRef.current) {
       const newOnes = utterances.slice(lastBroadcastCountRef.current);
       const name = account?.name ?? account?.username ?? 'Host';
-      for (const u of newOnes) {
-        broadcastUtterance({ ...u, speakerLabel: name });
+      for (const utterance of newOnes) {
+        broadcastUtterance({ ...utterance, speakerLabel: name });
       }
       lastBroadcastCountRef.current = utterances.length;
     }
-  }, [session, utterances, broadcastUtterance, account]);
+  }, [account, broadcastUtterance, session, utterances]);
 
-  // Broadcast translation updates
   useEffect(() => {
     if (!session) return;
-    for (const u of utterances) {
-      const translationCount = Object.keys(u.translatedTexts).length;
-      const lastCount = broadcastedTranslationsRef.current.get(u.id) ?? 0;
+    for (const utterance of utterances) {
+      const translationCount = Object.keys(utterance.translatedTexts).length;
+      const lastCount = broadcastedTranslationsRef.current.get(utterance.id) ?? 0;
       if (translationCount > lastCount) {
-        broadcastUtteranceUpdate(u.id, u.translatedTexts);
-        broadcastedTranslationsRef.current.set(u.id, translationCount);
+        broadcastUtteranceUpdate(utterance.id, utterance.translatedTexts);
+        broadcastedTranslationsRef.current.set(utterance.id, translationCount);
       }
     }
-  }, [session, utterances, broadcastUtteranceUpdate]);
+  }, [broadcastUtteranceUpdate, session, utterances]);
 
   const clearError = useCallback(() => {
     setUiError(null);
@@ -138,72 +146,114 @@ export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, o
   const activeError = uiError ?? transcriptionError;
 
   const debouncedUpdaterRef = useRef<ReturnType<typeof createDebouncedUpdater> | null>(null);
-
-  const handleStartSession = useCallback(() => {
-    const hostName = account?.name ?? account?.username ?? 'Host';
-    createSession(hostName, languageA, languageB);
-    setShowInvite(true);
-  }, [account, createSession, languageA, languageB]);
-
-  // Persist session record to Cosmos DB when a NEW session starts (skip for resumed)
-  const isResumedRef = useRef(false);
   useEffect(() => {
     if (!session) {
-      isResumedRef.current = false;
+      debouncedUpdaterRef.current = null;
       return;
     }
-    // If this session was triggered by resume, don't create a new record
-    if (resumeHandledRef.current === session.id) {
-      isResumedRef.current = true;
-    }
-    if (isResumedRef.current) {
-      debouncedUpdaterRef.current = createDebouncedUpdater(session.id);
-      return;
-    }
-    const title = sessionTitle.trim() || `Session ${new Date(session.createdAt).toLocaleDateString()}`;
-    const record: SessionRecord = {
-      id: session.id,
-      token: session.token,
-      title,
-      hostName: session.hostName,
-      hostEmail: account?.username,
-      languageA: session.languageA,
-      languageB: session.languageB,
-      guests: [],
-      utteranceCount: 0,
-      startedAt: session.createdAt,
-      status: 'active',
-    };
-    void createSessionRecord(record);
-    debouncedUpdaterRef.current = createDebouncedUpdater(session.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.id]);
+    debouncedUpdaterRef.current = createDebouncedUpdater(session.id, getApiToken);
+  }, [getApiToken, session]);
 
-  // Debounced utterance count updates
   useEffect(() => {
     if (session && debouncedUpdaterRef.current && utterances.length > 0) {
       debouncedUpdaterRef.current.update({ utteranceCount: utterances.length });
     }
   }, [session, utterances.length]);
 
-  const handleEndSession = useCallback(() => {
-    if (session) {
-      debouncedUpdaterRef.current?.flush();
-      // Fire-and-forget: mark session as ended, include transcript
-      void endSessionRecord(session.id, utterances.length, guests, utterances);
+  useEffect(() => {
+    if (!session) return;
 
-      // Upload audio if we were recording
-      if (isRecording) {
-        void (async () => {
-          const blob = await stopRecording();
-          if (blob.size > 0) {
-            void uploadSessionAudio(session.id, blob);
-          }
-        })();
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const accessToken = await getApiToken();
+        const requests = await fetchPendingGuestRequests(session.id, accessToken);
+        if (!cancelled) setPendingRequests(requests);
+      } catch {
+        if (!cancelled) setPendingRequests([]);
       }
-    }
+    };
+
+    void poll();
+    const interval = setInterval(() => {
+      void poll();
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [getApiToken, session]);
+
+  const handleStartSession = useCallback(() => {
+    void (async () => {
+      clearError();
+      if (!userId) throw new Error('Authenticated user ID not available.');
+
+      const hostName = account?.name ?? account?.username ?? 'Host';
+      const createdAt = Date.now();
+      const nextSession: Session = {
+        id: createId(),
+        ownerId: userId,
+        hostName,
+        createdAt,
+        languageA,
+        languageB,
+        title: sessionTitle.trim() || undefined,
+      };
+      const record: SessionRecord = {
+        id: nextSession.id,
+        ownerId: userId,
+        title: nextSession.title ?? `Session ${new Date(createdAt).toLocaleDateString()}`,
+        hostName,
+        hostEmail: account?.username,
+        languageA,
+        languageB,
+        invites: [],
+        guests: [],
+        utteranceCount: 0,
+        startedAt: createdAt,
+        status: 'active',
+      };
+
+      const accessToken = await getApiToken();
+      const created = await createSessionRecord(record, accessToken);
+      if (!created) throw new Error('Unable to create session.');
+
+      createSession(nextSession);
+      setHostDisplayLanguage(languageA);
+      setShowInvite(true);
+      lastBroadcastCountRef.current = 0;
+      broadcastedTranslationsRef.current.clear();
+    })().catch((error) => {
+      setUiError(error instanceof Error ? error.message : 'Unable to start session.');
+    });
+  }, [account, clearError, createSession, getApiToken, languageA, languageB, sessionTitle, userId]);
+
+  const handleEndSession = useCallback(() => {
+    const currentSession = session;
+    const currentGuests = guests;
+    const currentUtterances = utterances;
     endSession();
-  }, [endSession, session, utterances, guests, isRecording, stopRecording]);
+    setShowInvite(false);
+    setPendingRequests([]);
+
+    void (async () => {
+      if (!currentSession) return;
+      await debouncedUpdaterRef.current?.flush();
+      const accessToken = await getApiToken();
+      await endSessionRecord(currentSession.id, currentUtterances.length, currentGuests, accessToken, currentUtterances);
+
+      if (isRecording) {
+        const blob = await stopRecording();
+        if (blob.size > 0) {
+          await uploadSessionAudio(currentSession.id, blob, accessToken);
+        }
+      }
+    })().catch((error) => {
+      setUiError(error instanceof Error ? error.message : 'Unable to end session cleanly.');
+    });
+  }, [endSession, getApiToken, guests, isRecording, session, stopRecording, utterances]);
 
   const handleStartListening = useCallback(async () => {
     clearError();
@@ -222,22 +272,51 @@ export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, o
     }
   }, [stop]);
 
-  // Auto-start listening when a guest connects
   const autoStartedRef = useRef(false);
   useEffect(() => {
     if (session && guests.length > 0 && !isListening && !autoStartedRef.current) {
       autoStartedRef.current = true;
       void handleStartListening();
     }
-  }, [session, guests.length, isListening, handleStartListening]);
+  }, [guests.length, handleStartListening, isListening, session]);
 
-  // Reset auto-start flag when session ends
   useEffect(() => {
     if (!session) autoStartedRef.current = false;
   }, [session]);
 
-  // In session mode, all local utterances belong to the host.
-  // Override speaker labels so there's one fixed identity per side.
+  const handleApprove = useCallback((requestId: string) => {
+    if (!session) return;
+    void (async () => {
+      const accessToken = await getApiToken();
+      await approveGuestRequest(session.id, requestId, accessToken);
+      setPendingRequests((previous) => previous.filter((request) => request.requestId !== requestId));
+    })().catch((error) => {
+      setUiError(error instanceof Error ? error.message : 'Unable to approve guest request.');
+    });
+  }, [getApiToken, session]);
+
+  const handleDeny = useCallback((requestId: string) => {
+    if (!session) return;
+    void (async () => {
+      const accessToken = await getApiToken();
+      await denyGuestRequest(session.id, requestId, accessToken);
+      setPendingRequests((previous) => previous.filter((request) => request.requestId !== requestId));
+    })().catch((error) => {
+      setUiError(error instanceof Error ? error.message : 'Unable to deny guest request.');
+    });
+  }, [getApiToken, session]);
+
+  const handleRevoke = useCallback((guestId: string) => {
+    if (!session) return;
+    void (async () => {
+      const accessToken = await getApiToken();
+      await revokeGuest(session.id, guestId, accessToken);
+      removeGuest(guestId);
+    })().catch((error) => {
+      setUiError(error instanceof Error ? error.message : 'Unable to revoke guest access.');
+    });
+  }, [getApiToken, removeGuest, session]);
+
   const hostName = account?.name ?? account?.username ?? 'Host';
   const sessionSpeakers = new Map(speakers);
   for (const [id, speaker] of sessionSpeakers) {
@@ -257,7 +336,7 @@ export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, o
         <div className="session-setup">
           <div className="session-setup-card">
             <h2>Start a Shared Session</h2>
-            <p>Create a session and invite someone to join from their phone. They&apos;ll see the live translation in their chosen language.</p>
+            <p>Create a session and invite someone to join from their phone. They&apos;ll request admission before seeing the live translation.</p>
 
             <div className="session-title-field">
               <label htmlFor="session-title">Session Title</label>
@@ -267,7 +346,7 @@ export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, o
                 className="session-title-input"
                 placeholder="e.g. Patient intake — Dr. Smith"
                 value={sessionTitle}
-                onChange={(e) => setSessionTitle(e.target.value)}
+                onChange={(event) => setSessionTitle(event.target.value)}
               />
             </div>
 
@@ -331,18 +410,16 @@ export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, o
         </div>
       ) : (
         <div className="session-active">
-          {/* Session status bar */}
           <div className="session-status-bar">
             <div className="session-status-info">
               <span className={`session-status-dot session-status-dot--${connectionStatus}`} />
               <span className="session-status-label">
                 {session.title ?? (connectionStatus === 'connected' ? 'Session Active' : connectionStatus)}
               </span>
-              {guests.length > 0 && (
-                <span className="session-guest-count">
-                  {guests.map((g) => g.name).join(', ')} connected
-                </span>
-              )}
+              <span className="session-guest-count">
+                {guests.length} guest{guests.length === 1 ? '' : 's'}
+                {guests.length > 0 ? `: ${guests.map((guest) => guest.name).join(', ')}` : ''}
+              </span>
             </div>
             <div className="session-status-actions">
               <button
@@ -353,10 +430,7 @@ export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, o
                 <span className="session-listening-badge-dot" />
                 {isListening ? 'Listening' : guests.length === 0 ? 'Waiting for guest…' : 'Paused'}
               </button>
-              <button
-                className="session-invite-btn"
-                onClick={() => setShowInvite(true)}
-              >
+              <button className="session-invite-btn" onClick={() => setShowInvite(true)}>
                 Invite
               </button>
               <button className="session-end-btn" onClick={handleEndSession}>
@@ -365,14 +439,10 @@ export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, o
             </div>
           </div>
 
-          {/* Settings row */}
           <div className="session-settings-row">
             <label className="session-display-lang">
               <span>Display:</span>
-              <select
-                value={hostDisplayLanguage}
-                onChange={(e) => setHostDisplayLanguage(e.target.value)}
-              >
+              <select value={hostDisplayLanguage} onChange={(event) => setHostDisplayLanguage(event.target.value)}>
                 <option value={languageA}>{getLanguageLabel(languageA)}</option>
                 <option value={languageB}>{getLanguageLabel(languageB)}</option>
               </select>
@@ -386,16 +456,44 @@ export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, o
               utterances={utterances}
               speakers={speakers}
             />
-            <button
-              className="clear-btn"
-              onClick={clearTranscript}
-              disabled={utterances.length === 0}
-            >
+            <button className="clear-btn" onClick={clearTranscript} disabled={utterances.length === 0}>
               Clear Transcript
             </button>
           </div>
 
-          {/* Conversation display - single language */}
+          <div className="speaker-panel">
+            <h3>Pending guest requests</h3>
+            {(session ? pendingRequests : []).length === 0 ? (
+              <p className="settings-hint">No pending requests.</p>
+            ) : (
+              <ul className="speaker-list">
+                {(session ? pendingRequests : []).map((request) => (
+                  <li key={request.requestId} className="speaker-item">
+                    <span>{request.name} · {getLanguageLabel(request.language)}</span>
+                    <button className="recent-session-resume" onClick={() => handleApprove(request.requestId)}>Approve</button>
+                    <button className="session-delete-btn" onClick={() => handleDeny(request.requestId)}>Deny</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="speaker-panel">
+            <h3>Connected guests</h3>
+            {guests.length === 0 ? (
+              <p className="settings-hint">No guests connected.</p>
+            ) : (
+              <ul className="speaker-list">
+                {guests.map((guest) => (
+                  <li key={guest.id} className="speaker-item">
+                    <span>{guest.name} · {getLanguageLabel(guest.language)}</span>
+                    <button className="session-delete-btn" onClick={() => handleRevoke(guest.id)}>Revoke</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
           <div className="session-conversation session-conversation--single">
             <ConversationPanel
               utterances={utterances}
@@ -405,13 +503,11 @@ export function SessionPanel({ resumeRecord, onResumeHandled, translationMode, o
               onSpeak={speak}
             />
           </div>
-
-
         </div>
       )}
 
-      {showInvite && inviteUrl && (
-        <InviteModal inviteUrl={inviteUrl} onClose={() => setShowInvite(false)} />
+      {showInvite && session && (
+        <InviteModal sessionId={session.id} getApiToken={getApiToken} onClose={() => setShowInvite(false)} />
       )}
     </div>
   );

@@ -14,20 +14,14 @@ function getClient(): WebPubSubServiceClient {
   return _client;
 }
 
-/**
- * Generate a client access URL for a session participant.
- * The userId encodes role + session so the server-side event handler
- * can route messages to the correct session group.
- */
-export async function getClientUrl(
-  sessionId: string,
-  token: string,
-  role: 'host' | 'guest',
-): Promise<string> {
+export function getGuestUserId(sessionId: string, guestId: string): string {
+  return `guest:${sessionId}:${guestId}`;
+}
+
+export async function getHostClientUrl(sessionId: string, ownerId: string): Promise<string> {
   const client = getClient();
-  const userId = `${role}:${sessionId}`;
   const { url } = await client.getClientAccessToken({
-    userId,
+    userId: `host:${sessionId}:${ownerId}`,
     groups: [sessionId],
     roles: [
       `webpubsub.joinLeaveGroup.${sessionId}`,
@@ -35,4 +29,29 @@ export async function getClientUrl(
     ],
   });
   return url;
+}
+
+export async function getGuestClientUrl(sessionId: string, guestId: string): Promise<string> {
+  const client = getClient();
+  const { url } = await client.getClientAccessToken({
+    userId: getGuestUserId(sessionId, guestId),
+    groups: [sessionId],
+    roles: [`webpubsub.joinLeaveGroup.${sessionId}`],
+  });
+  return url;
+}
+
+export async function sendGroupMessage(sessionId: string, message: Record<string, unknown>): Promise<void> {
+  const client = getClient();
+  await client.group(sessionId).sendToAll(message);
+}
+
+export async function sendUserMessage(userId: string, message: Record<string, unknown>): Promise<void> {
+  const client = getClient();
+  await client.sendToUser(userId, message);
+}
+
+export async function removeConnectionFromSession(sessionId: string, connectionId: string): Promise<void> {
+  const client = getClient();
+  await client.group(sessionId).removeConnection(connectionId);
 }
