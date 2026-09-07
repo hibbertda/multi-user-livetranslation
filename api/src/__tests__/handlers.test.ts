@@ -37,6 +37,22 @@ vi.mock('../cosmos.js', () => ({
 // Mock storage
 vi.mock('../storage.js', () => ({
   uploadAudio: vi.fn(),
+  deleteAudioBlob: vi.fn(),
+  BlobConflictError: class BlobConflictError extends Error {
+    constructor(blobName: string) { super(`Blob already exists: ${blobName}`); this.name = 'BlobConflictError'; }
+  },
+  normaliseAllowedMime: vi.fn((raw: string) => {
+    const allowed = new Set([
+      'audio/webm', 'audio/webm;codecs=opus', 'audio/ogg', 'audio/ogg;codecs=opus',
+      'audio/wav', 'audio/wave', 'audio/mp4', 'video/webm', 'video/webm;codecs=opus',
+    ]);
+    const n = raw.toLowerCase().replace(/\s*;\s*/g, ';').trim();
+    return allowed.has(n) ? n : null;
+  }),
+  validateMagicBytes: vi.fn(() => true),
+  getMaxUploadBytes: vi.fn(() => 100 * 1024 * 1024),
+  audioBlobName: vi.fn((id: string) => `session-${id}.webm`),
+  isBlobAlreadyExistsError: vi.fn(() => false),
 }));
 
 // Mock pubsub
@@ -52,6 +68,7 @@ vi.mock('../pubsub.js', () => ({
 import type { SessionRecord, GuestRequestRecord } from '../cosmos.js';
 import * as cosmos from '../cosmos.js';
 import * as pubsub from '../pubsub.js';
+import * as storage from '../storage.js';
 
 // Import handlers AFTER mocks are set up
 import {
@@ -61,6 +78,7 @@ import {
   approveGuestHandler,
   guestExchangeHandler,
   guestRequestStatusHandler,
+  uploadAudioHandler,
 } from '../index.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -87,6 +105,8 @@ interface MockReqOpts {
   params?: Record<string, string>;
   query?: Record<string, string>;
   body?: unknown;
+  formDataEntries?: Record<string, { value: unknown }>;
+  formDataError?: boolean;
 }
 
 function makeReq(opts: MockReqOpts = {}): Record<string, unknown> {
@@ -104,6 +124,12 @@ function makeReq(opts: MockReqOpts = {}): Record<string, unknown> {
       get: (k: string) => query.get(k) ?? null,
     },
     json: async () => opts.body ?? {},
+    formData: opts.formDataError
+      ? async () => { throw new Error('bad multipart'); }
+      : async () => {
+          const entries = opts.formDataEntries ?? {};
+          return { get: (k: string) => (entries[k]?.value ?? null) };
+        },
   };
 }
 
@@ -567,5 +593,140 @@ describe('CORS', () => {
     // Should be 403 with "Origin not allowed"
     expect(res.status).toBe(403);
     expect(parseBody(res).error).toMatch(/Origin not allowed/i);
+  });
+});
+
+// ── Audio upload ────────────────────────────────────────────────────
+
+// WebM EBML header magic bytes
+const WEBM_MAGIC = new Uint8Array([0x1A, 0x45, 0xDF, 0xA3, 0x00, 0x00, 0x00, 0x00]);
+
+function makeFakeBlob(size: number, type: string): { size: number; type: string; arrayBuffer: () => Promise<ArrayBuffer> } {
+  const buf = new ArrayBuffer(size);
+  new Uint8Array(buf).set(WEBM_MAGIC.slice(0, Math.min(size, WEBM_MAGIC.length)));
+  return {
+    size,
+    type,
+    arrayBuffer: async () => buf,
+  };
+}
+
+function makeUploadReq(userId: string, sessionId: string, overrides: Partial<MockReqOpts> & { blob?: ReturnType<typeof makeFakeBlob> | null } = {}) {
+  const blob = overrides.blob !== undefined ? overrides.blob : makeFakeBlob(1024, 'audio/webm');
+  return makeAuthReq(userId, {
+    method: 'POST',
+    params: { id: sessionId },
+    formDataEntries: blob ? { audio: { value: blob } } : {},
+    ...overrides,
+  });
+}
+
+describe('uploadAudioHandler', () => {
+  beforeEach(() => {
+    vi.mocked(storage.getMaxUploadBytes).mockReturnValue(100 * 1024 * 1024);
+    vi.mocked(storage.validateMagicBytes).mockReturnValue(true);
+  });
+
+  it('rejects unauthenticated caller', async () => {
+    const res = await uploadAudioHandler(makeReq({ method: 'POST', params: { id: SESSION_ID } }));
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects non-owner', async () => {
+    vi.mocked(cosmos.getSession).mockResolvedValue(activeSession());
+    const res = await uploadAudioHandler(makeUploadReq(OTHER, SESSION_ID));
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects unsupported MIME type', async () => {
+    vi.mocked(cosmos.getSession).mockResolvedValue(activeSession());
+    const res = await uploadAudioHandler(makeUploadReq(OWNER, SESSION_ID, {
+      blob: makeFakeBlob(1024, 'application/octet-stream'),
+    }));
+    expect(res.status).toBe(415);
+    expect(parseBody(res).error).toMatch(/Unsupported audio type/);
+  });
+
+  it('rejects oversized Content-Length before formData parsing', async () => {
+    vi.mocked(cosmos.getSession).mockResolvedValue(activeSession());
+    vi.mocked(storage.getMaxUploadBytes).mockReturnValue(1000);
+    const res = await uploadAudioHandler(makeUploadReq(OWNER, SESSION_ID, {
+      headers: {
+        'x-ms-client-principal': makeClientPrincipal(OWNER),
+        'content-length': '2000',
+      },
+    }));
+    expect(res.status).toBe(413);
+    expect(parseBody(res).error).toMatch(/too large/);
+    // uploadAudio should NOT have been called
+    expect(storage.uploadAudio).not.toHaveBeenCalled();
+  });
+
+  it('rejects oversized Blob after parsing', async () => {
+    vi.mocked(cosmos.getSession).mockResolvedValue(activeSession());
+    vi.mocked(storage.getMaxUploadBytes).mockReturnValue(500);
+    const res = await uploadAudioHandler(makeUploadReq(OWNER, SESSION_ID, {
+      blob: makeFakeBlob(1024, 'audio/webm'),
+    }));
+    expect(res.status).toBe(413);
+    expect(parseBody(res).error).toMatch(/too large/);
+  });
+
+  it('rejects forged Content-Type (signature mismatch)', async () => {
+    vi.mocked(cosmos.getSession).mockResolvedValue(activeSession());
+    vi.mocked(storage.validateMagicBytes).mockReturnValue(false);
+    const res = await uploadAudioHandler(makeUploadReq(OWNER, SESSION_ID));
+    expect(res.status).toBe(415);
+    expect(parseBody(res).error).toMatch(/signature does not match/);
+  });
+
+  it('returns 201 on successful upload', async () => {
+    vi.mocked(cosmos.getSession).mockResolvedValue(activeSession());
+    vi.mocked(storage.uploadAudio).mockResolvedValue('https://blob.example/session-audio/session-test.webm');
+    vi.mocked(cosmos.patchSession).mockResolvedValue(undefined);
+
+    const res = await uploadAudioHandler(makeUploadReq(OWNER, SESSION_ID));
+    expect(res.status).toBe(201);
+    const body = parseBody(res);
+    expect(body.audioUrl).toBe('https://blob.example/session-audio/session-test.webm');
+    expect(storage.uploadAudio).toHaveBeenCalledTimes(1);
+    expect(cosmos.patchSession).toHaveBeenCalledWith(SESSION_ID, { audioUrl: 'https://blob.example/session-audio/session-test.webm' });
+  });
+
+  it('returns 409 when audio already exists (duplicate upload)', async () => {
+    vi.mocked(cosmos.getSession).mockResolvedValue(activeSession());
+    vi.mocked(storage.uploadAudio).mockRejectedValue(
+      new (storage as unknown as Record<string, new (...a: unknown[]) => Error>).BlobConflictError('session-test.webm'),
+    );
+
+    const res = await uploadAudioHandler(makeUploadReq(OWNER, SESSION_ID));
+    expect(res.status).toBe(409);
+    expect(parseBody(res).error).toMatch(/already uploaded/);
+  });
+
+  it('cleans up blob when Cosmos patch fails', async () => {
+    vi.mocked(cosmos.getSession).mockResolvedValue(activeSession());
+    vi.mocked(storage.uploadAudio).mockResolvedValue('https://blob.example/test.webm');
+    vi.mocked(cosmos.patchSession).mockRejectedValue(new Error('Cosmos down'));
+    vi.mocked(storage.deleteAudioBlob).mockResolvedValue(undefined);
+
+    await expect(uploadAudioHandler(makeUploadReq(OWNER, SESSION_ID))).rejects.toThrow('Cosmos down');
+    expect(storage.deleteAudioBlob).toHaveBeenCalledWith(SESSION_ID);
+  });
+
+  it('rejects empty audio file', async () => {
+    vi.mocked(cosmos.getSession).mockResolvedValue(activeSession());
+    const res = await uploadAudioHandler(makeUploadReq(OWNER, SESSION_ID, {
+      blob: makeFakeBlob(0, 'audio/webm'),
+    }));
+    expect(res.status).toBe(400);
+    expect(parseBody(res).error).toMatch(/empty/i);
+  });
+
+  it('rejects missing audio field in form data', async () => {
+    vi.mocked(cosmos.getSession).mockResolvedValue(activeSession());
+    const res = await uploadAudioHandler(makeUploadReq(OWNER, SESSION_ID, { blob: null }));
+    expect(res.status).toBe(400);
+    expect(parseBody(res).error).toMatch(/Missing audio file/);
   });
 });

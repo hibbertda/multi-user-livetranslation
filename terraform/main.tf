@@ -117,6 +117,7 @@ resource "azurerm_linux_function_app" "session_api" {
     "COSMOS_CONTAINER"          = azurerm_cosmosdb_sql_container.sessions.name
     "AUDIO_STORAGE_ACCOUNT"     = azurerm_storage_account.audio.name
     "AUDIO_STORAGE_CONTAINER"   = azurerm_storage_container.audio.name
+    "AUDIO_MAX_UPLOAD_BYTES"    = tostring(var.audio_max_upload_bytes)
     "ALLOWED_ORIGINS"           = "https://${azurerm_container_app.frontend.ingress[0].fqdn}"
   }
 

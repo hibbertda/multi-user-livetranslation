@@ -80,6 +80,17 @@ variable "container_app_env_name" {
   default     = "cae-live-translation"
 }
 
+variable "audio_max_upload_bytes" {
+  description = "Maximum allowed audio upload size in bytes (default 100 MiB)"
+  type        = number
+  default     = 104857600
+
+  validation {
+    condition     = var.audio_max_upload_bytes == floor(var.audio_max_upload_bytes) && var.audio_max_upload_bytes > 0 && var.audio_max_upload_bytes <= 524288000
+    error_message = "audio_max_upload_bytes must be a positive integer no larger than 524288000 (500 MiB)."
+  }
+}
+
 variable "azure_client_id" {
   description = "Entra ID App Registration client ID (for MSAL auth in the frontend)"
   type        = string

@@ -30,7 +30,7 @@ import {
   type SessionRecord,
   type UserSettings,
 } from './cosmos.js';
-import { uploadAudio } from './storage.js';
+import { uploadAudio, deleteAudioBlob, BlobConflictError, normaliseAllowedMime, validateMagicBytes, getMaxUploadBytes } from './storage.js';
 import type { AuthenticatedUser } from './auth.js';
 import { getAuthenticatedUser } from './auth.js';
 import { isExpired, validateGuestName, validateLanguage, validateText, isValidSessionId, validateTitle, validateSessionStatus, validateUtteranceCount, validateDurationMs, constantTimeEqual, findUnknownFields } from './validation.js';
@@ -551,7 +551,7 @@ app.http('endSession', {
   handler: endSessionHandler,
 });
 
-async function uploadAudioHandler(req: HttpRequest): Promise<HttpResponseInit> {
+export async function uploadAudioHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options(req);
 
   const id = req.params.id;
@@ -560,16 +560,73 @@ async function uploadAudioHandler(req: HttpRequest): Promise<HttpResponseInit> {
   const owned = await requireOwnedSession(req, id);
   if ('response' in owned) return owned.response;
 
-  const formData = await req.formData();
-  const file = formData.get('audio');
-  if (!file || !(file instanceof Blob)) {
-    return error(req, 'Missing audio file in form data');
+  // ── Pre-parse Content-Length guard ──────────────────────────────────
+  const maxBytes = getMaxUploadBytes();
+  const clHeader = req.headers.get('content-length');
+  if (clHeader) {
+    const cl = Number(clHeader);
+    if (!Number.isFinite(cl) || cl <= 0) {
+      return error(req, 'Invalid Content-Length', 400);
+    }
+    if (cl > maxBytes) {
+      return error(req, `Request body too large (limit ${maxBytes} bytes)`, 413);
+    }
   }
 
-  const arrayBuffer = await file.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-  const audioUrl = await uploadAudio(id, buffer, file.type || 'audio/webm');
-  await patchSession(id, { audioUrl });
+  // ── Parse multipart body ───────────────────────────────────────────
+  // NOTE: Azure Functions v4 HttpRequest.formData() materializes the entire
+  // body in memory (Web API FormData/Blob).  True streaming from req.body
+  // would require a manual multipart parser; we enforce size limits instead.
+  let formData: FormData;
+  try {
+    formData = await req.formData();
+  } catch {
+    return error(req, 'Invalid multipart form data', 400);
+  }
+  const file = formData.get('audio');
+  if (!file || typeof file === 'string' || typeof (file as Blob).arrayBuffer !== 'function') {
+    return error(req, 'Missing audio file in form data', 400);
+  }
+  const audioFile = file as Blob;
+
+  // ── Post-parse Blob size guard ─────────────────────────────────────
+  if (audioFile.size === 0) {
+    return error(req, 'Audio file is empty', 400);
+  }
+  if (audioFile.size > maxBytes) {
+    return error(req, `Audio file too large (limit ${maxBytes} bytes)`, 413);
+  }
+
+  // ── MIME allowlist ─────────────────────────────────────────────────
+  const mime = normaliseAllowedMime(audioFile.type || 'audio/webm');
+  if (!mime) {
+    return error(req, `Unsupported audio type: ${audioFile.type}`, 415);
+  }
+
+  // ── Magic-byte validation (reject forged Content-Type) ─────────────
+  const arrayBuffer = await audioFile.arrayBuffer();
+  if (!validateMagicBytes(mime, arrayBuffer)) {
+    return error(req, 'File signature does not match declared content type', 415);
+  }
+
+  // ── Upload with fail-if-exists (one recording per session) ─────────
+  let audioUrl: string;
+  try {
+    audioUrl = await uploadAudio(id, arrayBuffer, mime);
+  } catch (err) {
+    if (err instanceof BlobConflictError) {
+      return error(req, 'Audio already uploaded for this session', 409);
+    }
+    throw err;
+  }
+
+  // ── Patch session; clean up blob on Cosmos failure ─────────────────
+  try {
+    await patchSession(id, { audioUrl });
+  } catch (cosmosErr) {
+    await deleteAudioBlob(id);
+    throw cosmosErr;
+  }
   return json(req, { audioUrl }, 201);
 }
 
