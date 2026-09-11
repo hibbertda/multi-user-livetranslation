@@ -31,7 +31,12 @@ class FakeWebSocket {
   onclose: ((event: { code: number; reason: string }) => void) | null = null;
   onerror: (() => void) | null = null;
 
-  constructor(readonly url: string, readonly protocols?: string[]) {
+  readonly url: string;
+  readonly protocols?: string[];
+
+  constructor(url: string, protocols?: string[]) {
+    this.url = url;
+    this.protocols = protocols;
     FakeWebSocket.instances.push(this);
   }
 
