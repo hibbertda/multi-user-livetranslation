@@ -9,20 +9,17 @@ import App from './App';
 import { GuestApp } from './components/GuestApp';
 import './index.css';
 
-// ---------- Guest join route (no auth required) ----------
 const params = new URLSearchParams(window.location.search);
 const guestSessionId = params.get('session');
-const guestToken = params.get('token');
-const isGuestJoin = window.location.pathname === '/join' && guestSessionId && guestToken;
+const isGuestJoin = window.location.pathname === '/join' && guestSessionId;
 
 if (isGuestJoin) {
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
-      <GuestApp sessionId={guestSessionId} token={guestToken} />
+      <GuestApp sessionId={guestSessionId} />
     </StrictMode>,
   );
 } else {
-  // ---------- Normal host app with MSAL ----------
   const msalInstance = new PublicClientApplication(msalConfig);
   const configErrors = validateConfig();
 

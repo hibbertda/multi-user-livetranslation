@@ -1,6 +1,7 @@
 import { useMsal } from '@azure/msal-react';
-import { useCallback, useRef } from 'react';
-import { loginRequest, graphRequest } from '../auth/msalConfig';
+import { useCallback, useMemo, useRef } from 'react';
+import type { AccountInfo } from '@azure/msal-browser';
+import { apiRequest, loginRequest, graphRequest } from '../auth/msalConfig';
 import { config } from '../config';
 import { getTokenExpiryMs, getTokenTenantId } from '../utils/jwt';
 import { trackEvent } from '../utils/telemetry';
@@ -12,9 +13,17 @@ interface CachedToken {
 
 const TOKEN_EXPIRY_BUFFER_MS = 60_000;
 
+function getAccountUserId(account: AccountInfo | undefined): string | undefined {
+  const claims = account?.idTokenClaims as Record<string, unknown> | undefined;
+  const oid = typeof claims?.oid === 'string' ? claims.oid : undefined;
+  const sub = typeof claims?.sub === 'string' ? claims.sub : undefined;
+  return oid ?? account?.localAccountId ?? sub;
+}
+
 export function useAuth() {
   const { instance, accounts } = useMsal();
   const account = accounts[0];
+  const userId = useMemo(() => getAccountUserId(account), [account]);
   const tokenCacheRef = useRef<Record<string, CachedToken>>({});
 
   const validateTokenTenant = useCallback((token: string) => {
@@ -69,6 +78,22 @@ export function useAuth() {
     return acquireCachedToken('cognitive', loginRequest.scopes);
   }, [acquireCachedToken]);
 
+  const getApiToken = useCallback(async (): Promise<string> => {
+    try {
+      return await acquireCachedToken('api', apiRequest.scopes);
+    } catch {
+      if (!account) throw new Error('Not authenticated');
+      const result = await instance.acquireTokenPopup(apiRequest);
+      validateTokenTenant(result.accessToken);
+      const expiresAtMs = getTokenExpiryMs(result.accessToken) ?? Date.now() + 5 * 60 * 1000;
+      tokenCacheRef.current.api = {
+        accessToken: result.accessToken,
+        expiresAtMs,
+      };
+      return result.accessToken;
+    }
+  }, [acquireCachedToken, account, instance, validateTokenTenant]);
+
   const getGraphToken = useCallback(async (): Promise<string> => {
     try {
       return await acquireCachedToken('graph', graphRequest.scopes);
@@ -85,5 +110,5 @@ export function useAuth() {
     }
   }, [acquireCachedToken, account, instance, validateTokenTenant]);
 
-  return { account, login, logout, getToken, getGraphToken };
+  return { account, userId, login, logout, getToken, getApiToken, getGraphToken };
 }

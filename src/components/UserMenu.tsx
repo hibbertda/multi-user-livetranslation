@@ -15,7 +15,7 @@ export function UserMenu({ account, onLogout, getGraphToken }: Props) {
   const name = account.name || account.username || 'User';
   const initials = name
     .split(' ')
-    .map((w) => w[0])
+    .map((word) => word[0])
     .slice(0, 2)
     .join('')
     .toUpperCase();
@@ -25,7 +25,7 @@ export function UserMenu({ account, onLogout, getGraphToken }: Props) {
     getGraphToken()
       .then((token) =>
         fetch('https://graph.microsoft.com/v1.0/me/photo/$value', {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: { Authorization: 'Bearer ' + token },
         })
       )
       .then((res) => {
@@ -43,8 +43,8 @@ export function UserMenu({ account, onLogout, getGraphToken }: Props) {
   }, [getGraphToken]);
 
   useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+    function handleClick(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
         setOpen(false);
       }
     }

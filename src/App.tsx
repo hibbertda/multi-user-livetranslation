@@ -26,9 +26,9 @@ import './App.css';
 
 function App() {
   const isAuthenticated = useIsAuthenticated();
-  const { login, logout, getToken, getGraphToken, account } = useAuth();
+  const { login, logout, getToken, getApiToken, getGraphToken, account, userId } = useAuth();
 
-  const { settings, updateSettings } = usePersistedSettings(account?.localAccountId);
+  const { settings, updateSettings } = usePersistedSettings(userId, getApiToken);
   const [mode, setMode] = useState<DetectionMode>('specify');
   const [languageA, setLanguageA] = useState('en-US');
   const [languageB, setLanguageB] = useState('ar-SA');
@@ -40,7 +40,6 @@ function App() {
     const saved = sessionStorage.getItem('activeTab');
     return saved === 'split' || saved === 'unified' || saved === 'identify' || saved === 'session' || saved === 'history' ? saved : 'session';
   });
-
   const [resumeRecord, setResumeRecord] = useState<SessionRecord | null>(null);
 
   const handleResumeSession = useCallback((record: SessionRecord) => {
@@ -116,21 +115,20 @@ function App() {
     }
   }, [saveRecording]);
 
-  // Synchronized scrolling for split-view panels
   const scrollARef = useRef<HTMLDivElement>(null);
   const scrollBRef = useRef<HTMLDivElement>(null);
   const isSyncing = useRef(false);
 
   const onScrollA = useCallback(() => {
     if (isSyncing.current) return;
-    const s = scrollARef.current;
-    const t = scrollBRef.current;
-    if (!s || !t) return;
+    const source = scrollARef.current;
+    const target = scrollBRef.current;
+    if (!source || !target) return;
     isSyncing.current = true;
-    const maxScroll = s.scrollHeight - s.clientHeight;
-    const pct = maxScroll > 0 ? s.scrollTop / maxScroll : 0;
-    const targetMax = t.scrollHeight - t.clientHeight;
-    t.scrollTop = pct * targetMax;
+    const maxScroll = source.scrollHeight - source.clientHeight;
+    const pct = maxScroll > 0 ? source.scrollTop / maxScroll : 0;
+    const targetMax = target.scrollHeight - target.clientHeight;
+    target.scrollTop = pct * targetMax;
     requestAnimationFrame(() => {
       isSyncing.current = false;
     });
@@ -138,14 +136,14 @@ function App() {
 
   const onScrollB = useCallback(() => {
     if (isSyncing.current) return;
-    const s = scrollBRef.current;
-    const t = scrollARef.current;
-    if (!s || !t) return;
+    const source = scrollBRef.current;
+    const target = scrollARef.current;
+    if (!source || !target) return;
     isSyncing.current = true;
-    const maxScroll = s.scrollHeight - s.clientHeight;
-    const pct = maxScroll > 0 ? s.scrollTop / maxScroll : 0;
-    const targetMax = t.scrollHeight - t.clientHeight;
-    t.scrollTop = pct * targetMax;
+    const maxScroll = source.scrollHeight - source.clientHeight;
+    const pct = maxScroll > 0 ? source.scrollTop / maxScroll : 0;
+    const targetMax = target.scrollHeight - target.clientHeight;
+    target.scrollTop = pct * targetMax;
     requestAnimationFrame(() => {
       isSyncing.current = false;
     });
@@ -177,23 +175,22 @@ function App() {
         </div>
         <div className="app-header-right">
           <button className="header-icon-btn" onClick={() => setShowSettings(true)} aria-label="Settings" title="Settings">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
           </button>
           <RecentSessionsMenu onViewAll={() => { setView('history'); setNavOpen(false); }} onResume={handleResumeSession} />
           {account && <UserMenu account={account} onLogout={logout} getGraphToken={getGraphToken} />}
         </div>
       </header>
 
-      {/* Navigation drawer */}
       {navOpen && <div className="nav-overlay" onClick={() => setNavOpen(false)} />}
       <div className={`nav-drawer ${navOpen ? 'nav-drawer--open' : ''}`}>
         <nav className="nav-drawer-list">
           {([
-            { key: 'session', label: 'Shared Session', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg> },
-            { key: 'history', label: 'History', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> },
-            { key: 'split', label: 'Side by Side', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg> },
-            { key: 'unified', label: 'Unified', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="17" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="17" y1="18" x2="3" y2="18"/></svg> },
-            { key: 'identify', label: 'Identify Language', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> },
+            { key: 'session', label: 'Shared Session', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg> },
+            { key: 'history', label: 'History', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg> },
+            { key: 'split', label: 'Side by Side', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /><line x1="12" y1="3" x2="12" y2="21" /></svg> },
+            { key: 'unified', label: 'Unified', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="17" y1="10" x2="3" y2="10" /><line x1="21" y1="6" x2="3" y2="6" /><line x1="21" y1="14" x2="3" y2="14" /><line x1="17" y1="18" x2="3" y2="18" /></svg> },
+            { key: 'identify', label: 'Identify Language', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg> },
           ] as const).map(({ key, label, icon }) => (
             <button
               key={key}
@@ -265,11 +262,7 @@ function App() {
             utterances={utterances}
             speakers={speakers}
           />
-          <button
-            className="clear-btn"
-            onClick={clearTranscript}
-            disabled={utterances.length === 0}
-          >
+          <button className="clear-btn" onClick={clearTranscript} disabled={utterances.length === 0}>
             Clear Transcript
           </button>
         </div>
@@ -312,9 +305,9 @@ function App() {
             resumeRecord={resumeRecord}
             onResumeHandled={() => setResumeRecord(null)}
             translationMode={settings.translationMode}
-            onTranslationModeChange={(m) => updateSettings({ translationMode: m })}
+            onTranslationModeChange={(translationMode) => updateSettings({ translationMode })}
             microphoneDeviceId={settings.microphoneDeviceId}
-            onMicrophoneChange={(id) => updateSettings({ microphoneDeviceId: id })}
+            onMicrophoneChange={(deviceId) => updateSettings({ microphoneDeviceId: deviceId })}
           />
         </main>
       ) : view === 'history' ? (
@@ -343,7 +336,6 @@ function App() {
         </footer>
       )}
 
-      {/* Settings modal */}
       {showSettings && (
         <>
           <div className="settings-modal-overlay" onClick={() => setShowSettings(false)} />
@@ -356,9 +348,9 @@ function App() {
               <SettingsPage
                 devices={devices}
                 selectedDeviceId={settings.microphoneDeviceId || selectedDeviceId}
-                onSelectDevice={(id) => updateSettings({ microphoneDeviceId: id })}
+                onSelectDevice={(deviceId) => updateSettings({ microphoneDeviceId: deviceId })}
                 translationMode={settings.translationMode}
-                onTranslationModeChange={(m) => updateSettings({ translationMode: m })}
+                onTranslationModeChange={(translationMode) => updateSettings({ translationMode })}
               />
             </div>
           </div>

@@ -1,64 +1,65 @@
 import { config } from '../config';
 import type { SessionRecord, SessionGuest, Utterance, SessionUtterance } from '../types';
 
-/**
- * Client-side service to persist session records via the session API (Azure Function).
- * The API proxies to Cosmos DB and Blob Storage.
- * All calls are fire-and-forget (non-blocking) unless awaited explicitly.
- */
-
 function apiBase(): string {
   return config.signalingEndpoint || '';
 }
 
-async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
-  const url = `${apiBase()}${path}`;
-  return fetch(url, {
+async function apiFetch(path: string, accessToken: string, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  headers.set('Authorization', 'Bearer ' + accessToken);
+  if (!(init?.body instanceof FormData) && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  return fetch(`${apiBase()}${path}`, {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...init?.headers,
-    },
+    headers,
   });
 }
 
-/** Create a new session record */
-export async function createSessionRecord(record: SessionRecord): Promise<void> {
+export async function createSessionRecord(record: SessionRecord, accessToken: string): Promise<boolean> {
   try {
-    await apiFetch('/api/sessions', {
+    const response = await apiFetch('/api/sessions', accessToken, {
       method: 'POST',
       body: JSON.stringify(record),
     });
+    return response.ok;
   } catch {
     console.warn('[sessionStore] Failed to create session record');
+    return false;
   }
 }
 
-/** Update a session record (partial patch) */
 export async function updateSessionRecord(
   sessionId: string,
   patch: Partial<SessionRecord>,
-): Promise<void> {
+  accessToken: string,
+): Promise<boolean> {
   try {
-    await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, accessToken, {
       method: 'PATCH',
       body: JSON.stringify(patch),
     });
+    if (!response.ok) {
+      console.warn(`[sessionStore] Failed to update session record: HTTP ${response.status}`);
+      return false;
+    }
+    return true;
   } catch {
     console.warn('[sessionStore] Failed to update session record');
+    return false;
   }
 }
 
-/** End a session — sets endedAt, durationMs, status */
-/** Convert full Utterance to lightweight SessionUtterance for storage */
-function toSessionUtterance(u: Utterance): SessionUtterance {
+function toSessionUtterance(utterance: Utterance): SessionUtterance {
   return {
-    id: u.id,
-    speakerLabel: u.speakerLabel,
-    originalText: u.originalText,
-    translatedTexts: u.translatedTexts,
-    detectedLanguage: u.detectedLanguage,
-    timestamp: u.timestamp,
+    id: utterance.id,
+    speakerLabel: utterance.speakerLabel,
+    originalText: utterance.originalText,
+    translatedTexts: utterance.translatedTexts,
+    detectedLanguage: utterance.detectedLanguage,
+    timestamp: utterance.timestamp,
   };
 }
 
@@ -66,10 +67,11 @@ export async function endSessionRecord(
   sessionId: string,
   utteranceCount: number,
   guests: SessionGuest[],
+  accessToken: string,
   utterances?: Utterance[],
-): Promise<void> {
+): Promise<boolean> {
   try {
-    await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/end`, {
+    const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/end`, accessToken, {
       method: 'POST',
       body: JSON.stringify({
         utteranceCount,
@@ -77,37 +79,48 @@ export async function endSessionRecord(
         utterances: utterances?.map(toSessionUtterance),
       }),
     });
+    if (!response.ok) {
+      console.warn(`[sessionStore] Failed to end session record: HTTP ${response.status}`);
+      return false;
+    }
+    return true;
   } catch {
     console.warn('[sessionStore] Failed to end session record');
+    return false;
   }
 }
 
-/** Resume a session — sets status back to active */
-export async function resumeSessionRecord(sessionId: string): Promise<void> {
+export async function resumeSessionRecord(sessionId: string, accessToken: string): Promise<boolean> {
   try {
-    await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, accessToken, {
       method: 'PATCH',
       body: JSON.stringify({ status: 'active', endedAt: null, durationMs: null }),
     });
+    if (!response.ok) {
+      console.warn(`[sessionStore] Failed to resume session record: HTTP ${response.status}`);
+      return false;
+    }
+    return response.ok;
   } catch {
     console.warn('[sessionStore] Failed to resume session record');
+    return false;
   }
 }
 
-/** Upload audio blob after session ends */
 export async function uploadSessionAudio(
   sessionId: string,
   audioBlob: Blob,
+  accessToken: string,
 ): Promise<string | null> {
   try {
     const formData = new FormData();
     formData.append('audio', audioBlob, `session-${sessionId}.webm`);
-    const res = await fetch(`${apiBase()}/api/sessions/${encodeURIComponent(sessionId)}/audio`, {
+    const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/audio`, accessToken, {
       method: 'POST',
       body: formData,
     });
-    if (!res.ok) return null;
-    const data = await res.json();
+    if (!response.ok) return null;
+    const data = await response.json();
     return data.audioUrl ?? null;
   } catch {
     console.warn('[sessionStore] Failed to upload audio');
@@ -115,118 +128,125 @@ export async function uploadSessionAudio(
   }
 }
 
-/** Fetch recent sessions for the current user */
-export async function fetchRecentSessions(limit = 10): Promise<SessionRecord[]> {
+export async function fetchRecentSessions(accessToken: string, limit = 10): Promise<SessionRecord[]> {
   try {
-    const res = await apiFetch(`/api/sessions?limit=${limit}`);
-    if (!res.ok) return [];
-    return await res.json();
+    const response = await apiFetch(`/api/sessions?limit=${limit}`, accessToken);
+    if (!response.ok) return [];
+    return response.json();
   } catch {
     console.warn('[sessionStore] Failed to fetch sessions');
     return [];
   }
 }
 
-/** Fetch all sessions with optional filters */
-export async function fetchSessionHistory(params?: {
-  limit?: number;
-  offset?: number;
-}): Promise<SessionRecord[]> {
+export async function fetchSessionHistory(
+  accessToken: string,
+  params?: { limit?: number; offset?: number },
+): Promise<SessionRecord[]> {
   try {
     const query = new URLSearchParams();
     if (params?.limit) query.set('limit', String(params.limit));
     if (params?.offset) query.set('offset', String(params.offset));
-    const res = await apiFetch(`/api/sessions?${query.toString()}`);
-    if (!res.ok) return [];
-    return await res.json();
+    const response = await apiFetch(`/api/sessions?${query.toString()}`, accessToken);
+    if (!response.ok) return [];
+    return response.json();
   } catch {
     console.warn('[sessionStore] Failed to fetch session history');
     return [];
   }
 }
 
-/** Fetch a single session with full transcript */
-export async function fetchSession(sessionId: string): Promise<SessionRecord | null> {
+export async function fetchSession(sessionId: string, accessToken: string): Promise<SessionRecord | null> {
   try {
-    const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
-    if (!res.ok) return null;
-    return await res.json();
+    const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, accessToken);
+    if (!response.ok) return null;
+    return response.json();
   } catch {
     console.warn('[sessionStore] Failed to fetch session');
     return null;
   }
 }
 
-/** Delete a session permanently */
-export async function deleteSessionRecord(sessionId: string): Promise<boolean> {
+export async function deleteSessionRecord(sessionId: string, accessToken: string): Promise<boolean> {
   try {
-    const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, accessToken, {
       method: 'DELETE',
     });
-    return res.ok;
+    return response.ok;
   } catch {
     console.warn('[sessionStore] Failed to delete session');
     return false;
   }
 }
 
-/**
- * Debounced updater — batches utterance count updates so we don't
- * hammer Cosmos on every single utterance.
- */
-export function createDebouncedUpdater(sessionId: string, intervalMs = 5000) {
+export function createDebouncedUpdater(
+  sessionId: string,
+  getAccessToken: () => Promise<string>,
+  intervalMs = 5000,
+) {
   let pending: Partial<SessionRecord> | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
 
-  function flush() {
-    if (pending) {
-      void updateSessionRecord(sessionId, pending);
-      pending = null;
-    }
+  async function flushPending() {
+    const nextPatch = pending;
+    pending = null;
     timer = null;
+    if (!nextPatch) return;
+
+    try {
+      const accessToken = await getAccessToken();
+      const ok = await updateSessionRecord(sessionId, nextPatch, accessToken);
+      if (!ok) {
+        console.warn('[sessionStore] Debounced session update was rejected by server');
+      }
+    } catch {
+      console.warn('[sessionStore] Failed to flush debounced session update');
+    }
   }
 
   return {
     update(patch: Partial<SessionRecord>) {
       pending = { ...pending, ...patch };
       if (!timer) {
-        timer = setTimeout(flush, intervalMs);
+        timer = setTimeout(() => {
+          void flushPending();
+        }, intervalMs);
       }
     },
-    flush() {
+    async flush() {
       if (timer) clearTimeout(timer);
-      flush();
+      await flushPending();
     },
   };
 }
-
-// --------------- User Settings ---------------
 
 export interface PersistedSettings {
   microphoneDeviceId: string;
   translationMode: 'standard' | 'realtime';
 }
 
-/** Fetch user settings from Cosmos DB */
-export async function fetchUserSettings(userId: string): Promise<PersistedSettings | null> {
+export async function fetchUserSettings(userId: string, accessToken: string): Promise<PersistedSettings | null> {
   try {
-    const res = await apiFetch(`/api/settings/${encodeURIComponent(userId)}`);
-    if (!res.ok) return null;
-    return await res.json();
+    const response = await apiFetch(`/api/settings/${encodeURIComponent(userId)}`, accessToken);
+    if (!response.ok) return null;
+    return response.json();
   } catch {
     console.warn('[sessionStore] Failed to fetch user settings');
     return null;
   }
 }
 
-/** Save user settings to Cosmos DB */
-export async function saveUserSettings(userId: string, settings: PersistedSettings): Promise<boolean> {
+export async function saveUserSettings(
+  userId: string,
+  settings: PersistedSettings,
+  accessToken: string,
+): Promise<boolean> {
   try {
-    const res = await apiFetch(`/api/settings/${encodeURIComponent(userId)}`, {
+    const response = await apiFetch(`/api/settings/${encodeURIComponent(userId)}`, accessToken, {
       method: 'PUT',
       body: JSON.stringify(settings),
     });
-    return res.ok;
+    return response.ok;
   } catch {
     console.warn('[sessionStore] Failed to save user settings');
     return false;

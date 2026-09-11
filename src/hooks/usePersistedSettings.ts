@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { TranslationMode } from '../types';
 import { fetchUserSettings, saveUserSettings } from '../services/sessionStoreService';
 
@@ -29,33 +29,32 @@ function saveLocal(settings: PersistedSettings) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
 }
 
-export function usePersistedSettings(userId?: string) {
+export function usePersistedSettings(userId: string | undefined, getApiToken: (() => Promise<string>) | undefined) {
   const [settings, setSettingsState] = useState<PersistedSettings>(loadLocal);
   const loadedRef = useRef(false);
 
-  // Load from Cosmos on mount when userId is available
   useEffect(() => {
-    if (!userId || loadedRef.current) return;
+    if (!userId || !getApiToken || loadedRef.current) return;
     loadedRef.current = true;
-    fetchUserSettings(userId).then((remote) => {
+    void getApiToken().then((accessToken) => fetchUserSettings(userId, accessToken)).then((remote) => {
       if (remote) {
         const merged = { ...DEFAULTS, ...remote };
         setSettingsState(merged);
         saveLocal(merged);
       }
-    });
-  }, [userId]);
+    }).catch(() => undefined);
+  }, [getApiToken, userId]);
 
   const updateSettings = useCallback((patch: Partial<PersistedSettings>) => {
-    setSettingsState((prev) => {
-      const next = { ...prev, ...patch };
+    setSettingsState((previous) => {
+      const next = { ...previous, ...patch };
       saveLocal(next);
-      if (userId) {
-        void saveUserSettings(userId, next);
+      if (userId && getApiToken) {
+        void getApiToken().then((accessToken) => saveUserSettings(userId, next, accessToken)).catch(() => undefined);
       }
       return next;
     });
-  }, [userId]);
+  }, [getApiToken, userId]);
 
   return { settings, updateSettings };
 }

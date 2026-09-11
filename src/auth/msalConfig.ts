@@ -32,3 +32,7 @@ export const loginRequest = {
 export const graphRequest = {
   scopes: ['User.Read'],
 };
+
+export const apiRequest = {
+  scopes: [`api://${config.azureClientId}/access_as_user`],
+};

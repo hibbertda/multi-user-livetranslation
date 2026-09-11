@@ -2,37 +2,41 @@ import { useState } from 'react';
 import { LANGUAGE_POOL } from '../languages';
 
 interface Props {
-  sessionId: string;
-  token: string;
-  onJoin: (name: string, email: string | undefined, language: string) => void;
+  onJoin: (name: string, language: string) => Promise<void>;
   defaultLanguage?: string;
 }
 
 export function GuestJoin({ onJoin, defaultLanguage }: Props) {
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
   const [language, setLanguage] = useState(defaultLanguage ?? 'en-US');
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
     if (!name.trim()) return;
-    onJoin(name.trim(), email.trim() || undefined, language);
+
+    setSubmitting(true);
+    try {
+      await onJoin(name.trim(), language);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
     <div className="guest-join-screen">
       <div className="guest-join-card">
         <h1>Join Translation Session</h1>
-        <p>You&apos;ve been invited to a live translation session. Enter your details to join.</p>
+        <p>You&apos;ve been invited to a live translation session. Enter your details to request admission.</p>
 
-        <form onSubmit={handleSubmit} className="guest-join-form">
+        <form onSubmit={(event) => { void handleSubmit(event); }} className="guest-join-form">
           <label className="guest-field">
             <span className="guest-field-label">Your Name *</span>
             <input
               type="text"
               className="guest-field-input"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(event) => setName(event.target.value)}
               placeholder="Enter your name"
               required
               autoFocus
@@ -41,23 +45,11 @@ export function GuestJoin({ onJoin, defaultLanguage }: Props) {
           </label>
 
           <label className="guest-field">
-            <span className="guest-field-label">Email (optional)</span>
-            <input
-              type="email"
-              className="guest-field-input"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="your@email.com"
-              maxLength={254}
-            />
-          </label>
-
-          <label className="guest-field">
             <span className="guest-field-label">Display Language</span>
             <select
               className="guest-field-input"
               value={language}
-              onChange={(e) => setLanguage(e.target.value)}
+              onChange={(event) => setLanguage(event.target.value)}
             >
               {LANGUAGE_POOL.map((lang) => (
                 <option key={lang.code} value={lang.code}>
@@ -67,8 +59,10 @@ export function GuestJoin({ onJoin, defaultLanguage }: Props) {
             </select>
           </label>
 
-          <button type="submit" className="guest-join-btn" disabled={!name.trim()}>
-            Join Session
+          <p className="settings-hint">Your name and language are self-asserted and not verified.</p>
+
+          <button type="submit" className="guest-join-btn" disabled={!name.trim() || submitting}>
+            {submitting ? 'Requesting…' : 'Request Access'}
           </button>
         </form>
       </div>

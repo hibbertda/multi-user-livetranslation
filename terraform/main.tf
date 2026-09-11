@@ -83,8 +83,29 @@ resource "azurerm_linux_function_app" "session_api" {
       node_version = "22"
     }
     cors {
-      allowed_origins = ["*"]
+      allowed_origins = [
+        "https://${azurerm_container_app.frontend.ingress[0].fqdn}"
+      ]
     }
+  }
+
+  auth_settings_v2 {
+    auth_enabled     = true
+    default_provider = "azureactivedirectory"
+
+    active_directory_v2 {
+      client_id            = var.azure_client_id
+      tenant_auth_endpoint = "https://login.microsoftonline.com/${var.azure_tenant_id}/v2.0"
+      allowed_audiences    = ["api://${var.azure_client_id}"]
+    }
+
+    login {
+      token_store_enabled = true
+    }
+
+    require_authentication = true
+    unauthenticated_action = "Return401"
+    excluded_paths         = ["/api/guest/*"]
   }
 
   app_settings = {
@@ -96,6 +117,8 @@ resource "azurerm_linux_function_app" "session_api" {
     "COSMOS_CONTAINER"          = azurerm_cosmosdb_sql_container.sessions.name
     "AUDIO_STORAGE_ACCOUNT"     = azurerm_storage_account.audio.name
     "AUDIO_STORAGE_CONTAINER"   = azurerm_storage_container.audio.name
+    "AUDIO_MAX_UPLOAD_BYTES"    = tostring(var.audio_max_upload_bytes)
+    "ALLOWED_ORIGINS"           = "https://${azurerm_container_app.frontend.ingress[0].fqdn}"
   }
 
   identity {
@@ -193,6 +216,18 @@ resource "azurerm_cosmosdb_sql_container" "sessions" {
 
     included_path {
       path = "/status/?"
+    }
+
+    included_path {
+      path = "/ownerId/?"
+    }
+
+    included_path {
+      path = "/type/?"
+    }
+
+    included_path {
+      path = "/sessionId/?"
     }
 
     excluded_path {
