@@ -52,7 +52,8 @@ export function GuestApp({ sessionId }: Props) {
     );
   }
 
-  if (!session) {
+  // Terminal states win over the live view, even once the session is loaded.
+  if (!session || connectionStatus === 'left' || connectionStatus === 'timed-out') {
     const messages: Record<string, { title: string; description: string }> = {
       requesting: {
         title: 'Requesting Access',
@@ -101,6 +102,14 @@ export function GuestApp({ sessionId }: Props) {
       ended: {
         title: 'Session Ended',
         description: 'The host ended the session before you finished joining.',
+      },
+      left: {
+        title: 'You Left the Session',
+        description: 'You have left this session. Ask the host for a new invite if you want to rejoin.',
+      },
+      'timed-out': {
+        title: 'Disconnected',
+        description: errorMessage ?? 'You were disconnected from the session. Ask the host for a new invite to rejoin.',
       },
       idle: {
         title: 'Ready',

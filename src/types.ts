@@ -100,8 +100,12 @@ export interface GuestAdmission {
   revoked: boolean;
 }
 
+/** Why a guest is no longer part of the session. */
+export type GuestLeaveReason = 'left' | 'timeout' | 'revoked';
+
 export type SessionMessage =
   | { type: 'join'; guest: SessionGuest }
+  | { type: 'leave'; guestId: string; reason: GuestLeaveReason }
   | { type: 'welcome'; session: Session; speakers: [string, Speaker][]; utterances: Utterance[]; targetGuestId?: string }
   | { type: 'utterance'; utterance: Utterance }
   | { type: 'utterance-update'; utteranceId: string; translatedTexts: Record<string, string> }

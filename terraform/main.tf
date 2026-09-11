@@ -51,6 +51,28 @@ resource "azurerm_web_pubsub" "signaling" {
   capacity            = 1
 }
 
+# Shared secret guarding the public CloudEvents webhook that receives
+# connection lifecycle events for the signaling hub.
+resource "random_password" "webpubsub_event_secret" {
+  length  = 48
+  special = false
+}
+
+# Routes `connected` / `disconnected` system events to the Functions app so
+# guest presence can be tracked and stale guests swept from session rosters.
+resource "azurerm_web_pubsub_hub" "session" {
+  name          = "session"
+  web_pubsub_id = azurerm_web_pubsub.signaling.id
+
+  event_handler {
+    url_template       = "https://${azurerm_linux_function_app.session_api.default_hostname}/api/guest/events?secret=${random_password.webpubsub_event_secret.result}"
+    user_event_pattern = "*"
+    system_events      = ["connected", "disconnected"]
+  }
+
+  anonymous_connections_enabled = false
+}
+
 # ---------- Session API (Azure Function) ----------
 
 resource "azurerm_storage_account" "func" {
@@ -119,6 +141,10 @@ resource "azurerm_linux_function_app" "session_api" {
     "AUDIO_STORAGE_CONTAINER"   = azurerm_storage_container.audio.name
     "AUDIO_MAX_UPLOAD_BYTES"    = tostring(var.audio_max_upload_bytes)
     "ALLOWED_ORIGINS"           = "https://${azurerm_container_app.frontend.ingress[0].fqdn}"
+    "WEBPUBSUB_EVENT_SECRET"    = random_password.webpubsub_event_secret.result
+    "WEBPUBSUB_EVENT_ORIGIN"    = azurerm_web_pubsub.signaling.hostname
+    "GUEST_TIMEOUT_MS"          = tostring(var.guest_timeout_ms)
+    "GUEST_DISCONNECT_GRACE_MS" = tostring(var.guest_disconnect_grace_ms)
   }
 
   identity {

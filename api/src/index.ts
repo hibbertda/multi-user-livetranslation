@@ -1,5 +1,5 @@
 import { randomBytes, createHash, randomUUID } from 'node:crypto';
-import { app, HttpRequest, HttpResponseInit } from '@azure/functions';
+import { app, HttpRequest, HttpResponseInit, InvocationContext, Timer } from '@azure/functions';
 import {
   appendSessionGuest,
   countPendingGuestRequests,
@@ -9,12 +9,14 @@ import {
   endSession,
   findApprovedGuestRequestByTicketHash,
   getGuestAdmission,
+  getGuestAdmissionByUserId,
   getGuestRequest,
   getSession,
   getUserSettings,
   listGuestAdmissionsForSession,
   listGuestRequestsForSession,
   listPendingGuestRequests,
+  listPresentGuestAdmissions,
   listSessions,
   patchGuestAdmission,
   patchGuestRequest,
@@ -61,6 +63,25 @@ const REQUEST_TTL_MS = 30 * 60 * 1000;
 const TICKET_TTL_MS = 5 * 60 * 1000;
 const REQUESTS_PER_IP_PER_MINUTE = 5;
 const GUEST_AUDIO_PER_MINUTE = 30;
+const GUEST_HEARTBEAT_PER_MINUTE = 10;
+
+function readPositiveIntSetting(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+/** How long a guest may go without a heartbeat before the sweeper removes it. */
+export function getGuestTimeoutMs(): number {
+  return readPositiveIntSetting('GUEST_TIMEOUT_MS', 90_000);
+}
+
+/**
+ * Grace period after a transport disconnect before the guest is removed, so a
+ * brief network blip followed by a reconnect does not drop the guest.
+ */
+export function getGuestDisconnectGraceMs(): number {
+  return readPositiveIntSetting('GUEST_DISCONNECT_GRACE_MS', 30_000);
+}
 const MAX_PENDING_REQUESTS_PER_SESSION = 20;
 const ALLOWED_ORIGIN_VALUES = (process.env.ALLOWED_ORIGINS ?? '')
   .split(',')
@@ -70,6 +91,7 @@ const ALLOW_ALL_ORIGINS = ALLOWED_ORIGIN_VALUES.includes('*');
 const welcomeCache = new Map<string, Map<string, WelcomePayload>>();
 const ipRequestRateLimiter = new Map<string, number[]>();
 const guestAudioRateLimiter = new Map<string, number[]>();
+const guestHeartbeatRateLimiter = new Map<string, number[]>();
 
 function sha256Hex(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -939,7 +961,29 @@ app.http('guestExchange', {
   handler: guestExchangeHandler,
 });
 
-async function guestJoinHandler(req: HttpRequest): Promise<HttpResponseInit> {
+type GuestLeaveReason = 'left' | 'timeout' | 'revoked';
+
+/**
+ * Remove a guest from the session roster and tell everyone why. Safe to call
+ * repeatedly: a guest already marked as left short-circuits.
+ */
+async function departGuest(admission: GuestAdmissionRecord, reason: GuestLeaveReason): Promise<boolean> {
+  if (admission.left) return false;
+
+  const now = Date.now();
+  await patchGuestAdmission(admission.id, { left: true, leftAt: now, leftReason: reason, disconnectedAt: null });
+  await removeSessionGuest(admission.sessionId, admission.guestId);
+  clearWelcome(admission.sessionId, admission.guestId);
+
+  if (admission.connectionId) {
+    await removeConnectionFromSession(admission.sessionId, admission.connectionId).catch(() => undefined);
+  }
+
+  await sendGroupMessage(admission.sessionId, { type: 'leave', guestId: admission.guestId, reason }).catch(() => undefined);
+  return true;
+}
+
+export async function guestJoinHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options(req);
 
   const body = await readJson<{ sessionId?: string; guestId?: string; name?: string; language?: string; admissionId?: string }>(req);
@@ -960,6 +1004,7 @@ async function guestJoinHandler(req: HttpRequest): Promise<HttpResponseInit> {
 
   await Promise.all([
     appendSessionGuest(sessionId, guest),
+    patchGuestAdmission(admissionId, { lastSeenAt: Date.now(), disconnectedAt: null, left: false }),
     sendGroupMessage(sessionId, { type: 'join', guest }),
   ]);
 
@@ -973,7 +1018,7 @@ app.http('guestJoin', {
   handler: guestJoinHandler,
 });
 
-async function guestAudioHandler(req: HttpRequest): Promise<HttpResponseInit> {
+export async function guestAudioHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options(req);
 
   const body = await readJson<{ sessionId?: string; guestId?: string; text?: string; detectedLanguage?: string; admissionId?: string }>(req);
@@ -1008,6 +1053,64 @@ app.http('guestAudio', {
   authLevel: 'anonymous',
   route: 'guest/audio',
   handler: guestAudioHandler,
+});
+
+export async function guestLeaveHandler(req: HttpRequest): Promise<HttpResponseInit> {
+  if (req.method === 'OPTIONS') return options(req);
+
+  const body = await readJson<{ sessionId?: string; guestId?: string; admissionId?: string }>(req).catch(() => ({} as { sessionId?: string; guestId?: string; admissionId?: string }));
+  const sessionId = body.sessionId?.trim();
+  const guestId = body.guestId?.trim();
+  const admissionId = body.admissionId?.trim();
+
+  if (!sessionId || !guestId || !admissionId || guestId !== admissionId) {
+    return error(req, 'Missing guest leave identifiers');
+  }
+
+  const admission = await getGuestAdmission(admissionId);
+  // Leave is idempotent: unload beacons retry, and a revoked or already
+  // departed guest is simply confirmed rather than rejected.
+  if (!admission || admission.sessionId !== sessionId || admission.guestId !== guestId) {
+    return json(req, { ok: true });
+  }
+  if (admission.revoked || admission.left) return json(req, { ok: true });
+
+  await departGuest(admission, 'left');
+  return json(req, { ok: true });
+}
+
+app.http('guestLeave', {
+  methods: ['POST', 'OPTIONS'],
+  authLevel: 'anonymous',
+  route: 'guest/leave',
+  handler: guestLeaveHandler,
+});
+
+export async function guestHeartbeatHandler(req: HttpRequest): Promise<HttpResponseInit> {
+  if (req.method === 'OPTIONS') return options(req);
+
+  const body = await readJson<{ sessionId?: string; guestId?: string; admissionId?: string }>(req);
+  const sessionId = body.sessionId?.trim();
+  const guestId = body.guestId?.trim();
+  const admissionId = body.admissionId?.trim();
+  if (!sessionId || !guestId || !admissionId) return error(req, 'Missing heartbeat identifiers');
+
+  const validated = await validateAdmission(req, sessionId, guestId, admissionId);
+  if ('response' in validated) return validated.response;
+
+  if (!consumeRateLimit(guestHeartbeatRateLimiter, `${sessionId}:${guestId}`, GUEST_HEARTBEAT_PER_MINUTE, 60_000)) {
+    return error(req, 'Heartbeat rate limit exceeded', 429);
+  }
+
+  await patchGuestAdmission(admissionId, { lastSeenAt: Date.now(), disconnectedAt: null });
+  return json(req, { ok: true });
+}
+
+app.http('guestHeartbeat', {
+  methods: ['POST', 'OPTIONS'],
+  authLevel: 'anonymous',
+  route: 'guest/heartbeat',
+  handler: guestHeartbeatHandler,
 });
 
 async function guestWelcomeHandler(req: HttpRequest): Promise<HttpResponseInit> {
@@ -1071,7 +1174,7 @@ app.http('hostWelcome', {
   handler: hostWelcomeHandler,
 });
 
-async function revokeGuestHandler(req: HttpRequest): Promise<HttpResponseInit> {
+export async function revokeGuestHandler(req: HttpRequest): Promise<HttpResponseInit> {
   if (req.method === 'OPTIONS') return options(req);
 
   const sessionId = req.params.id;
@@ -1092,6 +1195,7 @@ async function revokeGuestHandler(req: HttpRequest): Promise<HttpResponseInit> {
     await removeConnectionFromSession(sessionId, admission.connectionId).catch(() => undefined);
   }
 
+  await sendGroupMessage(sessionId, { type: 'leave', guestId, reason: 'revoked' }).catch(() => undefined);
   await sendUserMessage(admission.userId, { type: 'revoked', guestId, message: 'Your session access has been revoked.' }).catch(() => undefined);
   return json(req, { ok: true });
 }
@@ -1101,4 +1205,111 @@ app.http('revokeGuest', {
   authLevel: 'anonymous',
   route: 'sessions/{id}/guests/{guestId}/revoke',
   handler: revokeGuestHandler,
+});
+
+// ── Guest liveness: Web PubSub connection events + timeout sweeper ──
+
+function isWebPubSubEventAuthorised(req: HttpRequest): boolean {
+  const secret = process.env.WEBPUBSUB_EVENT_SECRET;
+  if (!secret) return false;
+  const provided = req.query.get('secret') ?? req.headers.get('x-webpubsub-event-secret') ?? '';
+  return constantTimeEqual(provided, secret);
+}
+
+/**
+ * CloudEvents webhook for the Web PubSub `session` hub. Publicly reachable, so
+ * it is guarded by a shared secret and only echoes the abuse-protection origin
+ * once that secret has been verified.
+ */
+export async function webPubSubEventHandler(req: HttpRequest): Promise<HttpResponseInit> {
+  if (!isWebPubSubEventAuthorised(req)) {
+    return { status: 401, headers: { 'Cache-Control': 'no-store' }, body: JSON.stringify({ error: 'Unauthorized' }) };
+  }
+
+  if (req.method === 'OPTIONS') {
+    const requestOrigin = req.headers.get('webhook-request-origin');
+    if (!requestOrigin) return { status: 400, body: JSON.stringify({ error: 'Missing WebHook-Request-Origin' }) };
+
+    const expectedOrigin = process.env.WEBPUBSUB_EVENT_ORIGIN?.trim();
+    if (expectedOrigin && expectedOrigin !== requestOrigin) {
+      return { status: 403, body: JSON.stringify({ error: 'Origin not allowed' }) };
+    }
+
+    return { status: 200, headers: { 'WebHook-Allowed-Origin': requestOrigin, 'WebHook-Allowed-Rate': '*' } };
+  }
+
+  const eventType = req.headers.get('ce-type') ?? '';
+  const userId = req.headers.get('ce-userid') ?? '';
+  const connectionId = req.headers.get('ce-connectionid') ?? '';
+
+  // Only guest connections map onto admission records; host connections and
+  // user events are acknowledged and ignored.
+  if (!userId.startsWith('guest:')) return { status: 200, body: JSON.stringify({ ok: true }) };
+
+  const isConnected = eventType === 'azure.webpubsub.sys.connected';
+  const isDisconnected = eventType === 'azure.webpubsub.sys.disconnected';
+  if (!isConnected && !isDisconnected) return { status: 200, body: JSON.stringify({ ok: true }) };
+
+  const admission = await getGuestAdmissionByUserId(userId);
+  if (!admission) return { status: 200, body: JSON.stringify({ ok: true }) };
+
+  if (isConnected) {
+    await patchGuestAdmission(admission.id, {
+      connectionId: connectionId || admission.connectionId,
+      lastSeenAt: Date.now(),
+      disconnectedAt: null,
+    });
+    return { status: 200, body: JSON.stringify({ ok: true }) };
+  }
+
+  // A disconnect starts a grace period rather than removing the guest outright,
+  // so a brief network blip followed by a reconnect is not treated as a leave.
+  if (connectionId && admission.connectionId && admission.connectionId !== connectionId) {
+    return { status: 200, body: JSON.stringify({ ok: true }) };
+  }
+  await patchGuestAdmission(admission.id, { disconnectedAt: Date.now() });
+  return { status: 200, body: JSON.stringify({ ok: true }) };
+}
+
+app.http('webPubSubEvents', {
+  methods: ['POST', 'OPTIONS'],
+  authLevel: 'anonymous',
+  route: 'guest/events',
+  handler: webPubSubEventHandler,
+});
+
+export function isAdmissionExpired(admission: GuestAdmissionRecord, now: number, timeoutMs: number, graceMs: number): boolean {
+  if (typeof admission.disconnectedAt === 'number' && now - admission.disconnectedAt >= graceMs) return true;
+  const lastSeen = admission.lastSeenAt ?? admission.admittedAt;
+  return now - lastSeen >= timeoutMs;
+}
+
+/**
+ * Removes guests that stopped heartbeating or whose transport dropped and never
+ * came back, broadcasting a `leave` with reason `timeout`.
+ */
+export async function sweepGuestLiveness(now = Date.now()): Promise<{ removed: number }> {
+  const timeoutMs = getGuestTimeoutMs();
+  const graceMs = getGuestDisconnectGraceMs();
+  const admissions = await listPresentGuestAdmissions();
+
+  let removed = 0;
+  for (const admission of admissions) {
+    if (!isAdmissionExpired(admission, now, timeoutMs, graceMs)) continue;
+    try {
+      if (await departGuest(admission, 'timeout')) removed += 1;
+    } catch {
+      // Keep sweeping the remaining admissions if one removal fails.
+    }
+  }
+
+  return { removed };
+}
+
+app.timer('guestLivenessSweeper', {
+  schedule: process.env.GUEST_SWEEP_SCHEDULE ?? '*/30 * * * * *',
+  handler: async (_timer: Timer, context: InvocationContext) => {
+    const { removed } = await sweepGuestLiveness();
+    if (removed > 0) context.log(`Guest liveness sweep removed ${removed} guest(s)`);
+  },
 });

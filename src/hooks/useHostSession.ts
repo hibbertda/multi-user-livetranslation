@@ -1,11 +1,18 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { SignalingChannel, type ConnectionStatus } from '../services/signalingService';
+import {
+  SignalingChannel,
+  type ConnectionStatus,
+  type SignalingChannelFactory,
+  type SignalingTransport,
+} from '../services/signalingService';
 import { sendWelcome } from '../services/guestAdmission';
 import type { Session, SessionGuest, SessionMessage, Utterance, Speaker } from '../types';
 import { trackEvent } from '../utils/telemetry';
 
 interface UseHostSessionOptions {
   getApiToken: () => Promise<string>;
+  /** Optional transport factory; defaults to the real SignalingChannel. */
+  createChannel?: SignalingChannelFactory;
 }
 
 interface UseHostSessionReturn {
@@ -21,12 +28,17 @@ interface UseHostSessionReturn {
   broadcastSpeakerUpdate: (speaker: Speaker) => void;
 }
 
-export function useHostSession({ getApiToken }: UseHostSessionOptions): UseHostSessionReturn {
+const defaultCreateChannel: SignalingChannelFactory = (options) => new SignalingChannel(options);
+
+export function useHostSession({
+  getApiToken,
+  createChannel = defaultCreateChannel,
+}: UseHostSessionOptions): UseHostSessionReturn {
   const [session, setSession] = useState<Session | null>(null);
   const [guests, setGuests] = useState<SessionGuest[]>([]);
   const [connectionStatus, setConnectionStatus] = useState<'idle' | ConnectionStatus>('idle');
 
-  const channelRef = useRef<SignalingChannel | null>(null);
+  const channelRef = useRef<SignalingTransport | null>(null);
   const sessionRef = useRef<Session | null>(null);
   const utterancesSnapshotRef = useRef<Utterance[]>([]);
   const speakersSnapshotRef = useRef<Map<string, Speaker>>(new Map());
@@ -59,6 +71,15 @@ export function useHostSession({ getApiToken }: UseHostSessionOptions): UseHostS
       return;
     }
 
+    if (message.type === 'leave') {
+      setGuests((previous) => {
+        if (!previous.some((guest) => guest.id === message.guestId)) return previous;
+        trackEvent('session.guest_left', { guestId: message.guestId, reason: message.reason });
+        return previous.filter((guest) => guest.id !== message.guestId);
+      });
+      return;
+    }
+
     if (message.type === 'guest-audio') {
       trackEvent('session.guest_audio_received', { guestId: message.guestId });
     }
@@ -67,7 +88,7 @@ export function useHostSession({ getApiToken }: UseHostSessionOptions): UseHostS
   const connectChannel = useCallback((sessionId: string) => {
     channelRef.current?.close();
 
-    const channel = new SignalingChannel({
+    const channel = createChannel({
       sessionId,
       role: 'host',
       onMessage: handleMessage,
@@ -83,7 +104,7 @@ export function useHostSession({ getApiToken }: UseHostSessionOptions): UseHostS
 
     channelRef.current = channel;
     channel.connect();
-  }, [getApiToken, handleMessage]);
+  }, [createChannel, getApiToken, handleMessage]);
 
   const createSession = useCallback((nextSession: Session) => {
     sessionRef.current = nextSession;
