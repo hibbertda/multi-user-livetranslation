@@ -1,5 +1,10 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { SignalingChannel, type ConnectionStatus } from '../services/signalingService';
+import {
+  SignalingChannel,
+  type ConnectionStatus,
+  type SignalingChannelFactory,
+  type SignalingTransport,
+} from '../services/signalingService';
 import {
   ApiResponseError,
   exchangeGuestTicket,
@@ -32,6 +37,8 @@ export type GuestSessionStatus =
 interface UseGuestSessionOptions {
   sessionId: string;
   inviteSecret: string | null;
+  /** Optional transport factory; defaults to the real SignalingChannel. */
+  createChannel?: SignalingChannelFactory;
 }
 
 interface UseGuestSessionReturn {
@@ -46,7 +53,13 @@ interface UseGuestSessionReturn {
   errorMessage: string | null;
 }
 
-export function useGuestSession({ sessionId, inviteSecret }: UseGuestSessionOptions): UseGuestSessionReturn {
+const defaultCreateChannel: SignalingChannelFactory = (options) => new SignalingChannel(options);
+
+export function useGuestSession({
+  sessionId,
+  inviteSecret,
+  createChannel = defaultCreateChannel,
+}: UseGuestSessionOptions): UseGuestSessionReturn {
   const [session, setSession] = useState<Session | null>(null);
   const [utterances, setUtterances] = useState<Utterance[]>([]);
   const [speakers, setSpeakers] = useState<Map<string, Speaker>>(new Map());
@@ -55,7 +68,7 @@ export function useGuestSession({ sessionId, inviteSecret }: UseGuestSessionOpti
   const [guestId, setGuestId] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const channelRef = useRef<SignalingChannel | null>(null);
+  const channelRef = useRef<SignalingTransport | null>(null);
   const requestRef = useRef<{ requestId: string; requestSecret: string } | null>(null);
   const admissionRef = useRef<{ guestId: string; admissionId: string } | null>(null);
   const guestProfileRef = useRef<{ name: string; language: string } | null>(null);
@@ -137,7 +150,7 @@ export function useGuestSession({ sessionId, inviteSecret }: UseGuestSessionOpti
     setGuestId(guestIdValue);
 
     channelRef.current?.close();
-    const channel = new SignalingChannel({
+    const channel = createChannel({
       sessionId,
       role: 'guest',
       directUrl: url,
@@ -178,7 +191,7 @@ export function useGuestSession({ sessionId, inviteSecret }: UseGuestSessionOpti
 
     channelRef.current = channel;
     channel.connect();
-  }, [handleMessage, sessionEnded, sessionId]);
+  }, [createChannel, handleMessage, sessionEnded, sessionId]);
 
   const pollForWelcome = useCallback(async () => {
     if (!admissionRef.current || welcomeResolvedRef.current) return;

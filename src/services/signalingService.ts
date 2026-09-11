@@ -10,7 +10,26 @@ type StatusHandler = (status: ConnectionStatus) => void;
 const SESSION_REJECTION_CODES = new Set([4001, 4002, 4003, 4004]);
 const WPS_SUBPROTOCOL = 'json.webpubsub.azure.v1';
 
-export class SignalingChannel {
+export interface SignalingChannelOptions {
+  sessionId: string;
+  role: 'host' | 'guest';
+  onMessage: MessageHandler;
+  onStatus: StatusHandler;
+  getAccessToken?: () => Promise<string>;
+  directUrl?: string;
+  devToken?: string;
+}
+
+/** Transport surface used by the session hooks, so tests can substitute a double. */
+export interface SignalingTransport {
+  connect(): void;
+  send(message: SessionMessage): void;
+  close(): void;
+}
+
+export type SignalingChannelFactory = (options: SignalingChannelOptions) => SignalingTransport;
+
+export class SignalingChannel implements SignalingTransport {
   private ws: WebSocket | null = null;
   private readonly onMessage: MessageHandler;
   private readonly onStatus: StatusHandler;
@@ -23,15 +42,7 @@ export class SignalingChannel {
   private closed = false;
   private useWebPubSub = false;
 
-  constructor(opts: {
-    sessionId: string;
-    role: 'host' | 'guest';
-    onMessage: MessageHandler;
-    onStatus: StatusHandler;
-    getAccessToken?: () => Promise<string>;
-    directUrl?: string;
-    devToken?: string;
-  }) {
+  constructor(opts: SignalingChannelOptions) {
     this.sessionId = opts.sessionId;
     this.role = opts.role;
     this.onMessage = opts.onMessage;
