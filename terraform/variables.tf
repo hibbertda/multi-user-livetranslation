@@ -100,3 +100,15 @@ variable "azure_tenant_id" {
   description = "Entra ID tenant ID"
   type        = string
 }
+
+variable "guest_timeout_ms" {
+  description = "How long a guest may go without a heartbeat before being removed from the session roster."
+  type        = number
+  default     = 90000
+}
+
+variable "guest_disconnect_grace_ms" {
+  description = "Grace period after a Web PubSub disconnect before the guest is removed, allowing brief reconnects."
+  type        = number
+  default     = 30000
+}

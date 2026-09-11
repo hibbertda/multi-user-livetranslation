@@ -88,6 +88,10 @@ export function createRelayServer(options = {}) {
 
     const state = sessions.get(sessionId);
 
+    // Guest identity learned from traffic, so the relay can synthesise a
+    // `leave` when the socket drops — matching what the API does in production.
+    let guestId = null;
+
     ws.on('message', (data) => {
       const msg = data.toString();
       try {
@@ -96,6 +100,11 @@ export function createRelayServer(options = {}) {
         // Mark session as ended when host sends session-end
         if (parsed.type === 'session-end') {
           state.ended = true;
+        }
+        if (role !== 'host') {
+          if (parsed.type === 'join' && parsed.guest?.id) guestId = parsed.guest.id;
+          else if (parsed.type === 'guest-audio' && parsed.guestId) guestId = parsed.guestId;
+          else if (parsed.type === 'leave' && parsed.guestId) guestId = null;
         }
       } catch { /* ignore parse errors in logging */ }
       for (const client of state.clients) {
@@ -111,6 +120,12 @@ export function createRelayServer(options = {}) {
         state.hostWs = null;
       }
       logger.log(`[relay] ${role} left session ${sessionId.slice(0, 8)}… (${state.clients.size} clients)`);
+      if (guestId && !state.ended) {
+        const leaveMessage = JSON.stringify({ type: 'leave', guestId, reason: 'timeout' });
+        for (const client of state.clients) {
+          if (client.readyState === 1) client.send(leaveMessage);
+        }
+      }
       // Clean up ended sessions with no clients
       if (state.clients.size === 0 && state.ended) {
         sessions.delete(sessionId);

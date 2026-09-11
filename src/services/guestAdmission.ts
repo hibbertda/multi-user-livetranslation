@@ -174,6 +174,50 @@ export async function sendGuestAudio(payload: {
   });
 }
 
+export interface GuestIdentityPayload {
+  sessionId: string;
+  guestId: string;
+  admissionId: string;
+}
+
+export async function sendGuestLeave(payload: GuestIdentityPayload): Promise<void> {
+  await requestJson('/api/guest/leave', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Best-effort leave for page unload. `sendBeacon` cannot set custom headers, so
+ * the identity travels in the body; falls back to a keepalive fetch.
+ */
+export function sendGuestLeaveBeacon(payload: GuestIdentityPayload): boolean {
+  const url = `${apiBase()}/api/guest/leave`;
+  const body = JSON.stringify(payload);
+
+  if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+    try {
+      return navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }));
+    } catch {
+      // Fall through to fetch below.
+    }
+  }
+
+  try {
+    void fetch(url, { method: 'POST', body, headers: { 'Content-Type': 'application/json' }, keepalive: true }).catch(() => undefined);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function sendGuestHeartbeat(payload: GuestIdentityPayload): Promise<void> {
+  await requestJson('/api/guest/heartbeat', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function pollGuestWelcome(
   sessionId: string,
   guestId: string,

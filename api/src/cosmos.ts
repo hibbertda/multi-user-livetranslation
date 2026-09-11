@@ -97,6 +97,14 @@ export interface GuestAdmissionRecord {
   revokedAt?: number;
   userId: string;
   connectionId?: string;
+  /** Last time the guest proved liveness (heartbeat or connection event). */
+  lastSeenAt?: number;
+  /** Set when the transport dropped; cleared on reconnect. Starts the grace period. */
+  disconnectedAt?: number | null;
+  /** True once the guest has left (explicitly or by timeout). */
+  left?: boolean;
+  leftAt?: number;
+  leftReason?: 'left' | 'timeout' | 'revoked';
 }
 
 export interface UserSettings {
@@ -296,6 +304,25 @@ export async function listGuestAdmissionsForSession(sessionId: string): Promise<
   return queryDocuments<GuestAdmissionRecord>(
     'SELECT * FROM c WHERE c.type = "guestAdmission" AND c.sessionId = @sessionId',
     [{ name: '@sessionId', value: sessionId }],
+  );
+}
+
+export async function getGuestAdmissionByUserId(userId: string): Promise<GuestAdmissionRecord | null> {
+  const results = await queryDocuments<GuestAdmissionRecord>(
+    'SELECT TOP 1 * FROM c WHERE c.type = "guestAdmission" AND c.userId = @userId',
+    [{ name: '@userId', value: userId }],
+  );
+  return results[0] ?? null;
+}
+
+/**
+ * Admissions that are still considered present in a session, i.e. not revoked
+ * and not already marked as left. Used by the liveness sweeper.
+ */
+export async function listPresentGuestAdmissions(): Promise<GuestAdmissionRecord[]> {
+  return queryDocuments<GuestAdmissionRecord>(
+    'SELECT * FROM c WHERE c.type = "guestAdmission" AND c.revoked = false AND (NOT IS_DEFINED(c.left) OR c.left = false)',
+    [],
   );
 }
 

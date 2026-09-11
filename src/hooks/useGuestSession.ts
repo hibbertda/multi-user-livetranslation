@@ -13,7 +13,10 @@ import {
   pollGuestWelcome,
   requestGuestAccess,
   sendGuestAudio as postGuestAudio,
+  sendGuestHeartbeat,
   sendGuestJoin,
+  sendGuestLeave,
+  sendGuestLeaveBeacon,
   type WelcomePayload,
 } from '../services/guestAdmission';
 import type { Session, SessionMessage, Utterance, Speaker } from '../types';
@@ -32,7 +35,12 @@ export type GuestSessionStatus =
   | 'denied'
   | 'expired'
   | 'host-offline'
+  | 'left'
+  | 'timed-out'
   | 'error';
+
+/** How often an admitted guest proves liveness to the API. */
+export const GUEST_HEARTBEAT_INTERVAL_MS = 30_000;
 
 interface UseGuestSessionOptions {
   sessionId: string;
@@ -48,6 +56,7 @@ interface UseGuestSessionReturn {
   connectionStatus: GuestSessionStatus;
   join: (name: string, language: string) => Promise<void>;
   sendGuestAudio: (text: string, detectedLanguage: string) => Promise<void>;
+  leave: () => Promise<void>;
   guestId: string;
   sessionEnded: boolean;
   errorMessage: string | null;
@@ -76,25 +85,43 @@ export function useGuestSession({
   const welcomePollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const welcomePollAttemptsRef = useRef(0);
   const welcomeResolvedRef = useRef(false);
+  const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollForWelcomeRef = useRef<() => Promise<void>>(async () => undefined);
   const pollRequestStatusRef = useRef<() => Promise<void>>(async () => undefined);
+
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
+    heartbeatTimerRef.current = null;
+  }, []);
 
   const clearTimers = useCallback(() => {
     if (statusPollTimerRef.current) clearTimeout(statusPollTimerRef.current);
     if (welcomePollTimerRef.current) clearTimeout(welcomePollTimerRef.current);
     statusPollTimerRef.current = null;
     welcomePollTimerRef.current = null;
-  }, []);
+    stopHeartbeat();
+  }, [stopHeartbeat]);
+
+  const startHeartbeat = useCallback(() => {
+    stopHeartbeat();
+    heartbeatTimerRef.current = setInterval(() => {
+      const admission = admissionRef.current;
+      if (!admission) return;
+      void sendGuestHeartbeat({ sessionId, guestId: admission.guestId, admissionId: admission.admissionId })
+        .catch(() => undefined);
+    }, GUEST_HEARTBEAT_INTERVAL_MS);
+  }, [sessionId, stopHeartbeat]);
 
   const applyWelcome = useCallback((welcome: WelcomePayload) => {
     welcomeResolvedRef.current = true;
     clearTimers();
+    startHeartbeat();
     setSession(welcome.session);
     setUtterances(welcome.utterances);
     setSpeakers(new Map(welcome.speakers));
     setConnectionStatus('connected');
     trackEvent('guest.welcome_received', { utteranceCount: welcome.utterances.length });
-  }, [clearTimers]);
+  }, [clearTimers, startHeartbeat]);
 
   const handleMessage = useCallback((message: SessionMessage) => {
     switch (message.type) {
@@ -126,6 +153,15 @@ export function useGuestSession({
         channelRef.current?.close();
         clearTimers();
         trackEvent('guest.session_ended');
+        break;
+      case 'leave':
+        if (!admissionRef.current || message.guestId !== admissionRef.current.guestId) break;
+        setConnectionStatus(message.reason === 'timeout' ? 'timed-out' : 'left');
+        if (message.reason === 'timeout') {
+          setErrorMessage('You were disconnected from the session. You can ask the host for a new invite to rejoin.');
+        }
+        channelRef.current?.close();
+        clearTimers();
         break;
       case 'revoked':
         if (!admissionRef.current || message.guestId !== admissionRef.current.guestId) break;
@@ -330,6 +366,38 @@ export function useGuestSession({
     }
   }, [sessionId]);
 
+  const leave = useCallback(async () => {
+    const admission = admissionRef.current;
+    clearTimers();
+    channelRef.current?.close();
+    setConnectionStatus('left');
+
+    if (!admission) return;
+    admissionRef.current = null;
+    try {
+      await sendGuestLeave({ sessionId, guestId: admission.guestId, admissionId: admission.admissionId });
+      trackEvent('guest.left', { sessionId });
+    } catch {
+      // Leaving is best-effort; the liveness sweeper removes the guest anyway.
+    }
+  }, [clearTimers, sessionId]);
+
+  // Best-effort notification when the tab is closed or backgrounded for good.
+  useEffect(() => {
+    const notifyLeave = () => {
+      const admission = admissionRef.current;
+      if (!admission) return;
+      sendGuestLeaveBeacon({ sessionId, guestId: admission.guestId, admissionId: admission.admissionId });
+    };
+
+    window.addEventListener('pagehide', notifyLeave);
+    window.addEventListener('beforeunload', notifyLeave);
+    return () => {
+      window.removeEventListener('pagehide', notifyLeave);
+      window.removeEventListener('beforeunload', notifyLeave);
+    };
+  }, [sessionId]);
+
   useEffect(() => {
     return () => {
       clearTimers();
@@ -344,6 +412,7 @@ export function useGuestSession({
     connectionStatus,
     join,
     sendGuestAudio,
+    leave,
     guestId,
     sessionEnded,
     errorMessage,

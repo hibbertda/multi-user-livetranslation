@@ -71,6 +71,15 @@ export function useHostSession({
       return;
     }
 
+    if (message.type === 'leave') {
+      setGuests((previous) => {
+        if (!previous.some((guest) => guest.id === message.guestId)) return previous;
+        trackEvent('session.guest_left', { guestId: message.guestId, reason: message.reason });
+        return previous.filter((guest) => guest.id !== message.guestId);
+      });
+      return;
+    }
+
     if (message.type === 'guest-audio') {
       trackEvent('session.guest_audio_received', { guestId: message.guestId });
     }
