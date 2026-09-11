@@ -214,6 +214,77 @@ describe('dev relay two-party session', () => {
     });
   });
 
+  describe('guest disconnect', () => {
+    it('synthesises a leave for an identified guest that drops', async () => {
+      const host = await connectHost();
+      const alice = await connectGuest();
+      const bob = await connectGuest();
+
+      alice.send(JSON.stringify({ type: 'join', guest: { id: 'guest-alice', name: 'Alice', language: 'es-ES', joinedAt: 1 } }));
+      await settle();
+
+      const hostMessages = collectMessages(host);
+      const bobMessages = collectMessages(bob);
+      alice.close();
+      await settle();
+
+      expect(hostMessages).toContainEqual({ type: 'leave', guestId: 'guest-alice', reason: 'timeout' });
+      expect(bobMessages).toContainEqual({ type: 'leave', guestId: 'guest-alice', reason: 'timeout' });
+    });
+
+    it('identifies a guest from its audio when it never announced a join', async () => {
+      const host = await connectHost();
+      const alice = await connectGuest();
+
+      alice.send(JSON.stringify({ type: 'guest-audio', guestId: 'guest-alice', text: 'hola', detectedLanguage: 'es-ES' }));
+      await settle();
+
+      const hostMessages = collectMessages(host);
+      alice.close();
+      await settle();
+
+      expect(hostMessages).toContainEqual({ type: 'leave', guestId: 'guest-alice', reason: 'timeout' });
+    });
+
+    it('does not synthesise a leave for an anonymous guest', async () => {
+      const host = await connectHost();
+      const alice = await connectGuest();
+
+      const hostMessages = collectMessages(host);
+      alice.close();
+      await settle();
+
+      expect(hostMessages).toEqual([]);
+    });
+
+    it('does not synthesise a leave after an explicit leave', async () => {
+      const host = await connectHost();
+      const alice = await connectGuest();
+
+      alice.send(JSON.stringify({ type: 'join', guest: { id: 'guest-alice', name: 'Alice', language: 'es-ES', joinedAt: 1 } }));
+      await settle();
+      alice.send(JSON.stringify({ type: 'leave', guestId: 'guest-alice', reason: 'left' }));
+      await settle();
+
+      const hostMessages = collectMessages(host);
+      alice.close();
+      await settle();
+
+      expect(hostMessages).toEqual([]);
+    });
+
+    it('does not synthesise a leave when the host disconnects', async () => {
+      const host = await connectHost();
+      const alice = await connectGuest();
+
+      const aliceMessages = collectMessages(alice);
+      host.close();
+      await settle();
+
+      expect(aliceMessages).toEqual([]);
+    });
+  });
+
   describe('session end', () => {
     it('marks the session ended and blocks further joins', async () => {
       const host = await connectHost();

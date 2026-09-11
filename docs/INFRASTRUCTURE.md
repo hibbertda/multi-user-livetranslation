@@ -65,6 +65,21 @@ All service-to-service auth uses **Managed Identity** — no keys or connection 
 | `location` | No | Azure region (default: `eastus2`) |
 | `resource_group_name` | No | Resource group name (default: `rg-live-translation`) |
 | `resource_suffix` | No | Random suffix for globally unique names |
+| `guest_timeout_ms` | No | Heartbeat timeout before a guest is swept from a session (default: `90000`) |
+| `guest_disconnect_grace_ms` | No | Grace period after a Web PubSub disconnect before removal (default: `30000`) |
+
+### Guest presence
+
+The Web PubSub `session` hub forwards `connected` / `disconnected` system events
+to `POST /api/guest/events` on the Function App. That endpoint is public, so
+Terraform generates a shared secret (`WEBPUBSUB_EVENT_SECRET`) that is embedded
+in the hub's event handler URL and verified on every call, alongside the
+CloudEvents abuse-protection handshake restricted to `WEBPUBSUB_EVENT_ORIGIN`.
+
+Guests also heartbeat to `POST /api/guest/heartbeat` every 30s, and a timer
+triggered sweeper removes any guest whose heartbeat is older than
+`GUEST_TIMEOUT_MS` or whose disconnect grace period (`GUEST_DISCONNECT_GRACE_MS`)
+has elapsed, broadcasting a `leave` message with reason `timeout`.
 
 ## Outputs
 

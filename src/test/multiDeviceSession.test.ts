@@ -9,7 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import { useHostSession } from '../hooks/useHostSession';
-import { useGuestSession } from '../hooks/useGuestSession';
+import { GUEST_HEARTBEAT_INTERVAL_MS, useGuestSession } from '../hooks/useGuestSession';
 import { FakeSignalingHub } from './fakeSignaling';
 import type { Session, SessionMessage, Speaker, Utterance } from '../types';
 import type { WelcomePayload } from '../services/guestAdmission';
@@ -36,6 +36,11 @@ class FakeAdmissionBackend {
   welcomes = new Map<string, WelcomePayload>();
   joins: { guestId: string; name: string; language: string }[] = [];
   audio: { guestId: string; text: string; detectedLanguage: string }[] = [];
+  leaves: string[] = [];
+  beacons: string[] = [];
+  heartbeats: string[] = [];
+  /** Guest ids the backend should reject calls for, as if already removed. */
+  gone = new Set<string>();
 
   createRequest(sessionId: string, name: string, language: string) {
     const requestId = `request-${name.toLowerCase()}`;
@@ -67,6 +72,10 @@ class FakeAdmissionBackend {
     this.welcomes.clear();
     this.joins = [];
     this.audio = [];
+    this.leaves = [];
+    this.beacons = [];
+    this.heartbeats = [];
+    this.gone.clear();
   }
 }
 
@@ -114,6 +123,24 @@ vi.mock('../services/guestAdmission', async (importOriginal) => {
         text: payload.text,
         detectedLanguage: payload.detectedLanguage,
       }, { to: 'host' });
+    }),
+
+    sendGuestLeave: vi.fn(async (payload: { sessionId: string; guestId: string }) => {
+      // The API is idempotent, but it only broadcasts the first time.
+      if (backend.leaves.includes(payload.guestId)) return;
+      backend.leaves.push(payload.guestId);
+      backend.gone.add(payload.guestId);
+      hub.publish(payload.sessionId, { type: 'leave', guestId: payload.guestId, reason: 'left' });
+    }),
+
+    sendGuestLeaveBeacon: vi.fn((payload: { guestId: string }) => {
+      backend.beacons.push(payload.guestId);
+      return true;
+    }),
+
+    sendGuestHeartbeat: vi.fn(async (payload: { guestId: string }) => {
+      if (backend.gone.has(payload.guestId)) throw new actual.ApiResponseError(403, 'Admission revoked');
+      backend.heartbeats.push(payload.guestId);
     }),
 
     pollGuestWelcome: vi.fn(async (_sessionId: string, guestId: string) => {
@@ -456,6 +483,170 @@ describe('two-party session across multiple devices', () => {
       act(() => hub.find('guest-alice')!.drop('rejected'));
 
       await expectEventually(() => expect(alice.result.current.connectionStatus).toBe('expired'));
+    });
+  });
+
+  describe('guest leave and liveness', () => {
+    it('removes a leaving guest from the host roster without touching the other device', async () => {
+      const host = renderHost();
+      act(() => host.result.current.createSession(SESSION));
+      const alice = renderGuest('alice');
+      await admitGuest(alice, 'alice');
+      const bob = renderGuest('bob');
+      await admitGuest(bob, 'bob');
+      await expectEventually(() => expect(host.result.current.guests).toHaveLength(2));
+
+      await act(async () => {
+        await alice.result.current.leave();
+      });
+
+      expect(backend.leaves).toEqual(['guest-alice']);
+      await expectEventually(() => expect(host.result.current.guests.map((guest) => guest.id)).toEqual(['guest-bob']));
+      expect(alice.result.current.connectionStatus).toBe('left');
+      expect(bob.result.current.connectionStatus).toBe('connected');
+      expect(hub.channelsFor(SESSION_ID).map((channel) => channel.label)).not.toContain('guest-alice');
+    });
+
+    it('treats a repeated leave as a no-op', async () => {
+      const host = renderHost();
+      act(() => host.result.current.createSession(SESSION));
+      const alice = renderGuest('alice');
+      await admitGuest(alice, 'alice');
+
+      await act(async () => {
+        await alice.result.current.leave();
+        await alice.result.current.leave();
+      });
+
+      expect(backend.leaves).toEqual(['guest-alice']);
+      expect(host.result.current.guests).toEqual([]);
+      expect(alice.result.current.connectionStatus).toBe('left');
+    });
+
+    it('leaves cleanly even when the API call fails', async () => {
+      const host = renderHost();
+      act(() => host.result.current.createSession(SESSION));
+      const alice = renderGuest('alice');
+      await admitGuest(alice, 'alice');
+
+      const admission = await import('../services/guestAdmission');
+      vi.mocked(admission.sendGuestLeave).mockRejectedValueOnce(new Error('network down'));
+
+      await act(async () => {
+        await alice.result.current.leave();
+      });
+
+      expect(alice.result.current.connectionStatus).toBe('left');
+    });
+
+    it('removes a swept guest from the roster and tells that device why', async () => {
+      const host = renderHost();
+      act(() => host.result.current.createSession(SESSION));
+      const alice = renderGuest('alice');
+      await admitGuest(alice, 'alice');
+      const bob = renderGuest('bob');
+      await admitGuest(bob, 'bob');
+      await expectEventually(() => expect(host.result.current.guests).toHaveLength(2));
+
+      // The liveness sweeper publishes the leave on the guest's behalf.
+      act(() => {
+        hub.publish(SESSION_ID, { type: 'leave', guestId: 'guest-alice', reason: 'timeout' });
+      });
+
+      await expectEventually(() => expect(host.result.current.guests.map((guest) => guest.id)).toEqual(['guest-bob']));
+      expect(alice.result.current.connectionStatus).toBe('timed-out');
+      expect(alice.result.current.errorMessage).toMatch(/rejoin/i);
+      expect(bob.result.current.connectionStatus).toBe('connected');
+    });
+
+    it('ignores a leave for a guest that is not on the roster', async () => {
+      const host = renderHost();
+      act(() => host.result.current.createSession(SESSION));
+      const alice = renderGuest('alice');
+      await admitGuest(alice, 'alice');
+      await expectEventually(() => expect(host.result.current.guests).toHaveLength(1));
+
+      act(() => {
+        hub.publish(SESSION_ID, { type: 'leave', guestId: 'guest-unknown', reason: 'left' }, { to: 'host' });
+      });
+
+      expect(host.result.current.guests.map((guest) => guest.id)).toEqual(['guest-alice']);
+      expect(alice.result.current.connectionStatus).toBe('connected');
+    });
+
+    it('drops a revoked guest from the host roster when the API broadcasts the leave', async () => {
+      const host = renderHost();
+      act(() => host.result.current.createSession(SESSION));
+      const alice = renderGuest('alice');
+      await admitGuest(alice, 'alice');
+      await expectEventually(() => expect(host.result.current.guests).toHaveLength(1));
+
+      act(() => {
+        hub.publish(SESSION_ID, { type: 'leave', guestId: 'guest-alice', reason: 'revoked' }, { to: 'host' });
+      });
+
+      expect(host.result.current.guests).toEqual([]);
+    });
+
+    it('heartbeats on an interval while admitted and stops after leaving', async () => {
+      const host = renderHost();
+      act(() => host.result.current.createSession(SESSION));
+      const alice = renderGuest('alice');
+      await admitGuest(alice, 'alice');
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(GUEST_HEARTBEAT_INTERVAL_MS * 2);
+      });
+      expect(backend.heartbeats.filter((id) => id === 'guest-alice').length).toBeGreaterThanOrEqual(2);
+
+      await act(async () => {
+        await alice.result.current.leave();
+      });
+      const afterLeave = backend.heartbeats.length;
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(GUEST_HEARTBEAT_INTERVAL_MS * 3);
+      });
+      expect(backend.heartbeats).toHaveLength(afterLeave);
+    });
+
+    it('stops heartbeating once the session ends', async () => {
+      const host = renderHost();
+      act(() => host.result.current.createSession(SESSION));
+      const alice = renderGuest('alice');
+      await admitGuest(alice, 'alice');
+
+      act(() => host.result.current.endSession());
+      const afterEnd = backend.heartbeats.length;
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(GUEST_HEARTBEAT_INTERVAL_MS * 3);
+      });
+
+      expect(backend.heartbeats).toHaveLength(afterEnd);
+    });
+
+    it('reports a best-effort leave when the page is unloaded', async () => {
+      const host = renderHost();
+      act(() => host.result.current.createSession(SESSION));
+      const alice = renderGuest('alice');
+      await admitGuest(alice, 'alice');
+
+      act(() => {
+        window.dispatchEvent(new Event('pagehide'));
+      });
+
+      expect(backend.beacons).toEqual(['guest-alice']);
+    });
+
+    it('does not send an unload beacon before the guest is admitted', async () => {
+      renderGuest('alice');
+
+      act(() => {
+        window.dispatchEvent(new Event('pagehide'));
+      });
+
+      expect(backend.beacons).toEqual([]);
     });
   });
 

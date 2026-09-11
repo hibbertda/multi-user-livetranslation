@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 
 // Mock @azure/functions – prevent real Azure Function registration
 vi.mock('@azure/functions', () => ({
-  app: { http: vi.fn() },
+  app: { http: vi.fn(), timer: vi.fn() },
 }));
 
 // Mock cosmos
@@ -27,6 +27,8 @@ vi.mock('../cosmos.js', () => ({
   getGuestAdmission: vi.fn(),
   patchGuestAdmission: vi.fn(),
   listGuestAdmissionsForSession: vi.fn(),
+  listPresentGuestAdmissions: vi.fn(),
+  getGuestAdmissionByUserId: vi.fn(),
   appendSessionGuest: vi.fn(),
   removeSessionGuest: vi.fn(),
   endSession: vi.fn(),
